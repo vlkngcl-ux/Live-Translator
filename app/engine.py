@@ -62,19 +62,48 @@ def models_dir() -> Path:
     return resource_dir() / "models"
 
 
+MLX_TURBO_DIR = "mlx-whisper-large-v3-turbo"
+
+
+def mlx_status():
+    """(kullanılabilir_mi, açıklama). Yalnızca Apple Silicon Mac'te ve MLX yüklenebiliyorsa True."""
+    if sys.platform != "darwin":
+        return False, "macOS değil"
+    if not (models_dir() / MLX_TURBO_DIR / "weights.safetensors").exists():
+        return False, "MLX modeli pakette yok"
+    try:
+        import mlx.core as mx
+        if not mx.metal.is_available():
+            return False, "Metal GPU bulunamadı"
+        import mlx_whisper  # noqa: F401
+        return True, f"MLX {getattr(mx, '__version__', '?')}, {mx.default_device()}"
+    except Exception as e:  # ör. macOS 14'ten eski sürüm: kütüphane yüklenemez
+        return False, f"MLX yüklenemedi: {e}"
+
+
 def available_whisper_models():
-    """Pakette bulunan Whisper modelleri: [(etiket, klasör)]."""
+    """Kullanılabilir Whisper modelleri: [(etiket, klasör)]. İlk eleman varsayılandır.
+
+    Mac'te MLX (Apple GPU) kullanılabiliyorsa turbo onunla çalışır: GitHub'ın Apple M1 Mac'inde
+    ölçüm, cümle başına 9.3 sn (CPU) -> 1.8 sn (GPU), aynı doğrulukta.
+    """
+    found = []
+    if mlx_status()[0]:
+        found.append(("Doğru (turbo · GPU)", models_dir() / MLX_TURBO_DIR))
     labels = {
         "large-v3-turbo": "Doğru (turbo)",
         "medium": "Dengeli (medium)",
         "small": "Hızlı (small)",
     }
-    found = []
     for key, label in labels.items():
         p = models_dir() / f"whisper-{key}"
         if (p / "model.bin").exists():
             found.append((label, p))
     return found
+
+
+def is_mlx_path(path) -> bool:
+    return Path(path).name.startswith("mlx-")
 
 
 # Desteklenen diller: kod -> (Türkçe ad, kısaltma, NLLB kodu). Whisper ISO kodunu kullanır.
@@ -259,6 +288,65 @@ class Recognizer:
         return text, (float(np.mean(logprobs)) if logprobs else -10.0)
 
 
+class MLXRecognizer:
+    """Apple Silicon GPU'sunda (MLX) konuşma tanıma. Recognizer ile aynı arayüz.
+
+    Tüm MLX işlemleri TEK ve kalıcı bir iş parçacığında yapılır: uygulama oturumlar arasında
+    farklı iş parçacıkları kullandığı için, GPU kaynaklarının iş parçacıkları arasında
+    paylaşılmasından doğabilecek sorunlar böylece baştan önlenir.
+    Not: mlx-whisper ışın araması (beam search) desteklemez; her dilde açgözlü (greedy) çözümleme.
+    """
+
+    def __init__(self, model_path: Path, threads: int = 0):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.path = str(model_path)
+        self._ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+        self._ex.submit(self._warmup).result()     # modeli yükle + GPU çekirdeklerini hazırla
+
+    @staticmethod
+    def speech_seconds(audio: np.ndarray) -> float:
+        return Recognizer.speech_seconds(audio)    # VAD her iki motorda da aynı (CPU, çok ucuz)
+
+    def _warmup(self):
+        import mlx_whisper
+        mlx_whisper.transcribe(np.zeros(SAMPLE_RATE, np.float32), path_or_hf_repo=self.path,
+                               language="en", verbose=None)
+
+    def transcribe(self, audio: np.ndarray, language: str = "ro") -> str:
+        return self.transcribe_ex(audio, language)[0]
+
+    def transcribe_ex(self, audio: np.ndarray, language: str = "ro", prompt: str = None,
+                      beam_size: int = 1):
+        return self._ex.submit(self._transcribe, audio, language, prompt).result()
+
+    def _transcribe(self, audio, language, prompt):
+        import mlx_whisper
+        out = mlx_whisper.transcribe(
+            np.asarray(audio, np.float32), path_or_hf_repo=self.path, language=language,
+            task="transcribe", initial_prompt=prompt or None, verbose=None,
+            condition_on_previous_text=False, temperature=(0.0, 0.2, 0.4),
+            no_speech_threshold=0.6, compression_ratio_threshold=2.4, logprob_threshold=-1.0)
+        parts, logprobs = [], []
+        for s in out.get("segments", []):
+            # faster-whisper yolundakiyle AYNI segment süzgeci
+            if (s.get("no_speech_prob", 0) > SEG_MAX_NO_SPEECH or s.get("avg_logprob", 0) < SEG_MIN_LOGPROB
+                    or s.get("compression_ratio", 0) > SEG_MAX_COMPRESSION):
+                continue
+            t = s.get("text", "").strip()
+            if t:
+                parts.append(t)
+                logprobs.append(s.get("avg_logprob", 0.0))
+        return " ".join(parts), (float(np.mean(logprobs)) if logprobs else -10.0)
+
+
+def make_recognizer(model_path, threads: int):
+    """Klasör adına göre doğru tanıyıcıyı oluşturur (mlx-* -> GPU, diğerleri -> CPU)."""
+    if is_mlx_path(model_path):
+        return MLXRecognizer(model_path, threads)
+    return Recognizer(model_path, threads)
+
+
 class StreamResampler:
     """Mikrofon hızını (ör. 48 / 44.1 kHz) 16 kHz'e çeviren, DURUM TUTAN dönüştürücü.
 
@@ -412,6 +500,8 @@ class Engine:
         self.final_beam = None     # None: BEAM_BY_LANG / 1
         self._context = ""         # son tanınan metin (bağlam için)
         self.interim_recognizer = None   # ön çeviri için hızlı model (load() ayarlar)
+        self._small_cache = None         # yüklenmiş 'small' modeli (oturumlar arasında saklanır)
+        self.gpu = False                 # seçili model MLX (Apple GPU) mi
         # Tanıma ve çeviri aynı işçide sırayla çalışır; ikisi de tüm çekirdekleri kullanabilir.
         self.threads = max(1, os.cpu_count() or 2)
         # Yeterli çekirdek varsa ön çeviri AYRI bir iş parçacığında, kendi 2 çekirdeğiyle çalışır;
@@ -423,20 +513,29 @@ class Engine:
 
     # ---- model yükleme ----
     def load(self, whisper_path: Path, interim: bool = True):
+        whisper_path = Path(whisper_path)
+        self.gpu = is_mlx_path(whisper_path)
         if self._loaded_whisper != whisper_path:
             self.events.put(("status", "Konuşma tanıma modeli yükleniyor…"))
-            self.recognizer = Recognizer(whisper_path, self.final_threads)
+            self.recognizer = make_recognizer(
+                whisper_path, self.threads if self.gpu else self.final_threads)
             self._loaded_whisper = whisper_path
-        # Ön çeviri için hızlı model: seçili model zaten 'small' ise onu kullan
+        # Ön çeviri modeli:
+        #  - GPU (MLX) seçiliyse aynı model: kesin çeviri ~2 sn sürdüğü için ikinci modele gerek yok
+        #  - 'small' seçiliyse aynı model
+        #  - aksi halde 'small' (bir kez yüklenir, oturumlar arasında saklanır)
         small = models_dir() / "whisper-small"
-        if not interim or not (small / "model.bin").exists():
+        if not interim:
             self.interim_recognizer = None
-        elif Path(whisper_path) == small:
+        elif self.gpu or whisper_path == small:
             self.interim_recognizer = self.recognizer
-        elif getattr(self, "_interim_path", None) != small:
-            self.events.put(("status", "Ön çeviri modeli yükleniyor…"))
-            self.interim_recognizer = Recognizer(small, self.interim_threads)
-            self._interim_path = small
+        elif (small / "model.bin").exists():
+            if self._small_cache is None:
+                self.events.put(("status", "Ön çeviri modeli yükleniyor…"))
+                self._small_cache = Recognizer(small, self.interim_threads)
+            self.interim_recognizer = self._small_cache
+        else:
+            self.interim_recognizer = None
         if self.translator is None:
             self.events.put(("status", "Çeviri modeli yükleniyor…"))
             self.translator = Translator(models_dir() / "nllb", self.threads)
@@ -549,7 +648,12 @@ class Engine:
             threading.Thread(target=segment_loop, daemon=True),
             threading.Thread(target=self._worker, daemon=True),
         ]
-        if self.parallel_interim and self.interim_recognizer is not None:
+        # Paralel ön çeviri yalnızca CPU'da ve ayrı bir model varken; GPU'da (tek MLX iş parçacığı)
+        # ve aynı model paylaşılırken sırayla çalışılır.
+        self._parallel_now = (self.parallel_interim and not self.gpu
+                              and self.interim_recognizer is not None
+                              and self.interim_recognizer is not self.recognizer)
+        if self._parallel_now:
             self._threads.append(threading.Thread(target=self._interim_loop, daemon=True))
         for t in self._threads:
             t.start()
@@ -577,7 +681,7 @@ class Engine:
                 # Kesin çeviri her zaman önceliklidir; kuyruk boşsa ön çeviri yapılır.
                 item = self._chunk_q.get(timeout=0.05)
             except queue.Empty:
-                if not self.parallel_interim:      # sıralı mod: boşta kalınca ön çeviri yap
+                if not self._parallel_now:         # sıralı mod: boşta kalınca ön çeviri yap
                     iv = self._take_interim()
                     if iv:
                         self._do_interim(iv)

@@ -55,6 +55,13 @@ def main():
         convert(f"openai/whisper-{s}", MODELS / f"whisper-{s}",
                 ["tokenizer.json", "preprocessor_config.json"])
     convert("facebook/nllb-200-distilled-600M", MODELS / "nllb", ["sentencepiece.bpe.model"])
+    # Mac (Apple GPU) için MLX biçiminde turbo. Yalnızca Mac paketine girer (build/app.spec).
+    mlx_dir = MODELS / "mlx-whisper-large-v3-turbo"
+    if not (mlx_dir / "weights.safetensors").exists():
+        from huggingface_hub import snapshot_download
+        print("[indiriliyor] mlx-community/whisper-large-v3-turbo")
+        snapshot_download("mlx-community/whisper-large-v3-turbo", local_dir=str(mlx_dir),
+                          allow_patterns=["config.json", "weights.safetensors"])
     for code, fleurs_lang in (("ro", "ro_ro"), ("en", "en_us"), ("tr", "tr_tr")):
         selftest_audio(fleurs_lang, MODELS / f"selftest_{code}.npy")
     shutil.rmtree(MODELS / ".cache", ignore_errors=True)

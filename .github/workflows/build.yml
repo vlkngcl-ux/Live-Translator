@@ -36,7 +36,7 @@ concurrency:
 env:
   WHISPER_SIZES: "large-v3-turbo,small"
   # Modeller veya dönüştürücü sürümü değişirse bu anahtarı değiştirin (önbellek yenilenir).
-  MODELS_KEY: models-v2-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr
+  MODELS_KEY: models-v3-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr-mlxturbo
 
 jobs:
   version:
@@ -119,6 +119,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller==6.22.3
           python -c "import tkinter; print('Tk', tkinter.TkVersion)"
+
+      # Mac: Apple GPU motoru (MLX). Derleme makinesi macOS 26 olduğu için pip kendi başına
+      # yalnızca macOS 26'da çalışan paketi seçer; macOS 14+ için olanı ZORLA kuruyoruz.
+      # mlx-whisper --no-deps: resmi bağımlılığı olan torch çalışırken kullanılmıyor (paket şişmesin).
+      - name: MLX kur (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pip download --no-deps --only-binary=:all: --platform macosx_14_0_arm64 \
+            --python-version 3.11 -d mlx-wheels mlx==0.32.3 mlx-metal==0.32.3
+          ls mlx-wheels
+          pip install --no-deps mlx-wheels/*.whl
+          pip install --no-deps mlx-whisper==0.4.3
+          pip install numba tiktoken more-itertools scipy
+          python -c "import mlx.core as mx, mlx_whisper; print('MLX', mx.__version__, mx.default_device(), 'metal', mx.metal.is_available())"
+          python -c "import sys, mlx_whisper; assert 'torch' not in sys.modules, 'torch yüklendi'; print('torch yok: OK')"
 
       - name: Sürümü ayarla
         shell: bash

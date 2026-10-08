@@ -1,0 +1,60 @@
+name: Mac MLX paket denemesi (yayınsız)
+
+# Yalnızca "mlx-deneme" dalına gönderimde çalışır. Mac paketini MLX ile derler ve paketlenmiş
+# uygulamanın kendi kendine testini çalıştırır. Sürüm YAYINLAMAZ.
+on:
+  push:
+    branches: [mlx-deneme]
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Eski model önbelleği (CPU modelleri, NLLB, test sesleri)
+        uses: actions/cache/restore@v4
+        with:
+          path: models
+          key: models-v2-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr
+          enableCrossOsArchive: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: MLX modelini indir
+        run: |
+          pip install huggingface_hub
+          python -c "from huggingface_hub import snapshot_download as s; s('mlx-community/whisper-large-v3-turbo', local_dir='models/mlx-whisper-large-v3-turbo', allow_patterns=['config.json','weights.safetensors'])"
+          ls -la models models/mlx-whisper-large-v3-turbo
+      - name: Bağımlılıkları kur
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.22.3
+      - name: MLX kur (macOS 14 uyumlu paket)
+        run: |
+          pip download --no-deps --only-binary=:all: --platform macosx_14_0_arm64 \
+            --python-version 3.11 -d mlx-wheels mlx==0.32.3 mlx-metal==0.32.3
+          ls mlx-wheels
+          pip install --no-deps mlx-wheels/*.whl
+          pip install --no-deps mlx-whisper==0.4.3
+          pip install numba tiktoken more-itertools scipy
+          python -c "import mlx.core as mx, mlx_whisper; print('MLX', mx.__version__, mx.default_device(), 'metal', mx.metal.is_available())"
+          python -c "import sys, mlx_whisper; assert 'torch' not in sys.modules, 'torch yüklendi'; print('torch yok: OK')"
+      - name: Paketle
+        run: pyinstaller build/app.spec --noconfirm --workpath pyi-work
+      - name: Paket içeriği
+        run: |
+          du -sh dist/CanliCevirmen.app
+          find dist/CanliCevirmen.app -maxdepth 4 -type d -name models -exec ls {} \;
+          find dist/CanliCevirmen.app -name "*.metallib" -o -name "libmlx*.dylib" | head
+          otool -l "$(find dist/CanliCevirmen.app -name 'libmlx*.dylib' | head -1)" | grep -A4 LC_BUILD_VERSION | head -6 || true
+      - name: Paketlenmiş uygulamanın kendi kendine testi
+        run: |
+          set +e
+          dist/CanliCevirmen.app/Contents/MacOS/CanliCevirmen --selftest selftest.json models
+          code=$?
+          cat selftest.json
+          exit $code
