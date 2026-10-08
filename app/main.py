@@ -391,7 +391,7 @@ def selftest(out_path: str, sample: str = None) -> int:
 
     import numpy as np
 
-    from engine import Recognizer, Translator, models_dir
+    from engine import SAMPLE_RATE, Translator, make_recognizer, mlx_status, models_dir
 
     report = {"ok": False, "models": {}}
     try:
@@ -412,7 +412,7 @@ def selftest(out_path: str, sample: str = None) -> int:
             "Bună ziua, ce mai faceți? Astăzi vremea este frumoasă.", "ro", "tr")
         all_ok = bool(report["translate_text"])
         for label, path in available_whisper_models():
-            rec = Recognizer(path, threads)
+            rec = make_recognizer(path, threads)
             rows = []
             for src, audio in samples.items():
                 t = time.time()
@@ -423,6 +423,42 @@ def selftest(out_path: str, sample: str = None) -> int:
                                  "seconds": round(time.time() - t, 1)})
                     all_ok = all_ok and bool(text) and bool(out)
             report["models"][label] = rows
+
+        # Mac: MLX (GPU) pakette varsa GERÇEKTEN çalışmalı; yoksa paketleme bozuktur.
+        ok_mlx, why = mlx_status()
+        report["mlx"] = why
+        if sys.platform == "darwin" and (models_dir() / "mlx-whisper-large-v3-turbo").exists():
+            all_ok = all_ok and ok_mlx
+
+        # Gerçek uygulama hattı (bölücü + iş parçacıkları + ön çeviri) varsayılan modelle
+        if samples:
+            src = "tr" if "tr" in samples else next(iter(samples))
+            eng = Engine()
+            eng.set_languages(src, "en" if src != "en" else "tr")
+            label0, path0 = available_whisper_models()[0]
+            eng.load(path0, interim=True)
+            audio = np.concatenate([np.zeros(SAMPLE_RATE, np.float32), samples[src],
+                                    np.zeros(2 * SAMPLE_RATE, np.float32)])
+            t = time.time()
+            # Gerçek zamanlı besle (mikrofon gibi): gecikme ölçümü ancak böyle anlamlı olur.
+            eng.start_from_array(audio, SAMPLE_RATE, realtime=True)
+            finals, n_interim = [], 0
+            while True:
+                kind, val = eng.events.get(timeout=600)
+                if kind == "result":
+                    finals.append(val)
+                elif kind == "interim":
+                    n_interim += 1
+                elif kind == "done":
+                    break
+            report["pipeline"] = {"model": label0, "gpu": eng.gpu, "results": len(finals),
+                                  "sureler": eng.stats.get("sureler"),
+                                  "on_ceviri_sureleri": eng.stats.get("on_ceviri_sureleri"),
+                                  "interim": n_interim, "seconds": round(time.time() - t, 1),
+                                  "latency": [round(r.latency, 1) for r in finals],
+                                  "target": " | ".join(r.target for r in finals)[:300]}
+            all_ok = all_ok and bool(finals)
+
         report["sounddevice"] = _check_sounddevice()
         report["ok"] = all_ok and bool(report["models"])
     except Exception:

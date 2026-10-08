@@ -14,11 +14,16 @@ internet gerekmez, ses hiçbir yere gönderilmez.
 
 | Sistem | Durum |
 |---|---|
-| Windows 10/11 (64-bit) | Desteklenir |
-| macOS 11+ — Apple Silicon (M1/M2/M3/M4) | Desteklenir |
+| Windows 10/11 (64-bit) | Desteklenir (işlemci ile) |
+| macOS 14+ — Apple Silicon (M1/M2/M3/M4) | Desteklenir, **Apple GPU (MLX) ile hızlı mod** |
+| macOS 11–13 — Apple Silicon | Çalışır ama GPU modu yok; yalnızca **Hızlı (small)** (işlemci ile) |
 | macOS — Intel işlemcili Mac | **Desteklenmez** (çeviri motorunun Intel Mac paketi yok) |
 
-Kurulum boyutu yaklaşık 1,5–2 GB'tır (modeller dahil).
+Mac'te **"Doğru (turbo · GPU)"** modu konuşma tanımayı grafik işlemcisinde yapar. GitHub'ın Apple M1
+test makinesinde ölçüm: cümle başına tanıma ~9 sn (işlemci) → ~2 sn (GPU), doğruluk aynı.
+GPU modunda Romence için geniş arama (beam) yoktur; Romence doğruluğu biraz düşebilir (Mac'te ölçülmedi).
+
+Kurulum boyutu: Windows ~1,5 GB, Mac ~2,5 GB (modeller dahil).
 
 ---
 
