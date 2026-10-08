@@ -440,7 +440,8 @@ def selftest(out_path: str, sample: str = None) -> int:
             audio = np.concatenate([np.zeros(SAMPLE_RATE, np.float32), samples[src],
                                     np.zeros(2 * SAMPLE_RATE, np.float32)])
             t = time.time()
-            eng.start_from_array(audio, SAMPLE_RATE)
+            # Gerçek zamanlı besle (mikrofon gibi): gecikme ölçümü ancak böyle anlamlı olur.
+            eng.start_from_array(audio, SAMPLE_RATE, realtime=True)
             finals, n_interim = [], 0
             while True:
                 kind, val = eng.events.get(timeout=600)
@@ -451,6 +452,8 @@ def selftest(out_path: str, sample: str = None) -> int:
                 elif kind == "done":
                     break
             report["pipeline"] = {"model": label0, "gpu": eng.gpu, "results": len(finals),
+                                  "sureler": eng.stats.get("sureler"),
+                                  "on_ceviri_sureleri": eng.stats.get("on_ceviri_sureleri"),
                                   "interim": n_interim, "seconds": round(time.time() - t, 1),
                                   "latency": [round(r.latency, 1) for r in finals],
                                   "target": " | ".join(r.target for r in finals)[:300]}

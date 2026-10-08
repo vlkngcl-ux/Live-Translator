@@ -696,9 +696,12 @@ class Engine:
             self._last_final_id = cid
             src, tgt = self.src, self.tgt   # oturum boyunca sabit (arayüz kayıtta seçimi kilitler)
             try:
+                tm = {"bekleme": round(time.monotonic() - closed_at, 2), "ses_sn": round(len(audio) / SAMPLE_RATE, 1)}
                 # 1) Ucuz kapı: içinde gerçek konuşma yoksa Whisper'a hiç gönderme.
                 #    Hem uydurmayı hem işlemci yükünü (ve dolayısıyla gecikmeyi) azaltır.
+                _t = time.monotonic()
                 speech = self.recognizer.speech_seconds(audio)
+                tm["vad"] = round(time.monotonic() - _t, 2)
                 if speech < MIN_VAD_SPEECH_SEC:
                     self.stats["vad_skipped"] += 1
                     self.events.put(("discard", cid))        # varsa ön çeviriyi kaldır
@@ -706,8 +709,10 @@ class Engine:
                 # 2) Tanıma (önceki metin bağlam olarak) + uydurma filtresi
                 prompt = self._context[-200:] if self.use_context else None
                 beam = self.final_beam or BEAM_BY_LANG.get(src, 1)
+                _t = time.monotonic()
                 text, logprob = self.recognizer.transcribe_ex(
                     audio, language=src, prompt=prompt, beam_size=beam)
+                tm["tanima"] = round(time.monotonic() - _t, 2)
                 cleaned = clean_hallucinations(text, src, speech, logprob)
                 if not cleaned:
                     if text:
@@ -715,7 +720,10 @@ class Engine:
                     self.events.put(("discard", cid))
                     continue
                 self._context = (self._context + " " + cleaned).strip()[-400:]
+                _t = time.monotonic()
                 out = self.translator.translate(cleaned, src, tgt)
+                tm["ceviri"] = round(time.monotonic() - _t, 2)
+                self.stats.setdefault("sureler", []).append(tm)   # tanılama: adım adım süreler
                 self.events.put(("result", Result(
                     t0, t1, cleaned, out, src, tgt, latency=time.monotonic() - closed_at,
                     wall=self._wall0 + t0, rid=cid)))
@@ -727,10 +735,13 @@ class Engine:
         cid, t0, dur, audio = item
         src, tgt = self.src, self.tgt
         try:
+            _t0 = time.monotonic()
             if self.recognizer.speech_seconds(audio) < MIN_VAD_SPEECH_SEC:
                 return
             prompt = self._context[-200:] if self.use_context else None
             text, logprob = self.interim_recognizer.transcribe_ex(audio, language=src, prompt=prompt)
+            self.stats.setdefault("on_ceviri_sureleri", []).append(
+                {"ses_sn": round(dur, 1), "sure": round(time.monotonic() - _t0, 2)})
             text = clean_hallucinations(text, src, 2.0, logprob)
             if not text or cid <= self._last_final_id:   # bu arada kesin çevirisi geldiyse gösterme
                 return
