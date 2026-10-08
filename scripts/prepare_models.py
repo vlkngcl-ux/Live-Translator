@@ -59,9 +59,15 @@ def main():
     mlx_dir = MODELS / "mlx-whisper-large-v3-turbo"
     if not (mlx_dir / "weights.safetensors").exists():
         from huggingface_hub import snapshot_download
-        print("[indiriliyor] mlx-community/whisper-large-v3-turbo")
-        snapshot_download("mlx-community/whisper-large-v3-turbo", local_dir=str(mlx_dir),
-                          allow_patterns=["config.json", "weights.safetensors"])
+        # 8-bit: Mac GPU ölçümünde (10 Türkçe kayıt) tam modelle AYNI hata oranı (%8.4), yarı boyut
+        # (0.86 GB). Tam model .dmg'yi GitHub'ın 2 GB dosya sınırının üstüne çıkarıyordu (2.3 GB).
+        # 4-bit daha küçük ama hata oranı %10.1'e çıktı.
+        print("[indiriliyor] mlx-community/whisper-large-v3-turbo-8bit")
+        snapshot_download("mlx-community/whisper-large-v3-turbo-8bit", local_dir=str(mlx_dir),
+                          allow_patterns=["config.json", "model.safetensors"])
+        # mlx-whisper ağırlık dosyasını 'weights.safetensors' adıyla arar
+        (mlx_dir / "model.safetensors").rename(mlx_dir / "weights.safetensors")
+        shutil.rmtree(mlx_dir / ".cache", ignore_errors=True)
     for code, fleurs_lang in (("ro", "ro_ro"), ("en", "en_us"), ("tr", "tr_tr")):
         selftest_audio(fleurs_lang, MODELS / f"selftest_{code}.npy")
     shutil.rmtree(MODELS / ".cache", ignore_errors=True)

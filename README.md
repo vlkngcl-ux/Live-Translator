@@ -23,7 +23,8 @@ Mac'te **"Doğru (turbo · GPU)"** modu konuşma tanımayı grafik işlemcisinde
 test makinesinde ölçüm: cümle başına tanıma ~9 sn (işlemci) → ~2 sn (GPU), doğruluk aynı.
 GPU modunda Romence için geniş arama (beam) yoktur; Romence doğruluğu biraz düşebilir (Mac'te ölçülmedi).
 
-Kurulum boyutu: Windows ~1,5 GB, Mac ~2,5 GB (modeller dahil).
+Kurulum dosyası boyutu: Windows ~1,5 GB, Mac ~1,7 GB (modeller dahil). Mac'teki GPU modeli 8-bit
+sıkıştırılmıştır; ölçümde tam modelle aynı doğrulukta, yarı boyutta.
 
 ---
 

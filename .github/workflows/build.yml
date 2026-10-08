@@ -36,7 +36,7 @@ concurrency:
 env:
   WHISPER_SIZES: "large-v3-turbo,small"
   # Modeller veya dönüştürücü sürümü değişirse bu anahtarı değiştirin (önbellek yenilenir).
-  MODELS_KEY: models-v3-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr-mlxturbo
+  MODELS_KEY: models-v4-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr-mlxturbo8bit
 
 jobs:
   version:
