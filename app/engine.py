@@ -13,6 +13,7 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 import collections
 import queue
+import re
 import sys
 import threading
 import time
@@ -25,9 +26,10 @@ SAMPLE_RATE = 16000
 
 # Konuşma bölme ayarları
 FRAME_SEC = 0.03            # enerji ölçüm penceresi
-MIN_CHUNK_SEC = 4.0         # bu süreden kısa parçalar, sessizlik olsa bile bekletilir
-MAX_CHUNK_SEC = 20.0        # bu süreye ulaşan parça zorla gönderilir (Whisper sınırı 30 sn)
-SILENCE_END_SEC = 0.7       # konuşmadan sonra bu kadar sessizlik -> parçayı kapat
+MIN_CHUNK_SEC = 2.0         # bu süreden kısa parçalar, sessizlik olsa bile bekletilir (v1.1.0: 4.0)
+MAX_CHUNK_SEC = 15.0        # bu süreye ulaşan parça zorla gönderilir (v1.1.0: 20.0; Whisper sınırı 30 sn)
+SILENCE_END_SEC = 0.6       # konuşmadan sonra bu kadar sessizlik -> parçayı kapat (v1.1.0: 0.7)
+MIN_VAD_SPEECH_SEC = 0.5    # Silero VAD'in parçada bulduğu konuşma bundan azsa Whisper'a hiç gönderilmez
 MIN_SPEECH_SEC = 0.3        # toplam konuşma bundan azsa parça atılır (gürültüyü Whisper VAD ayrıca eler)
 PREROLL_SEC = 0.3           # konuşma başlamadan önceki bu kadar ses de parçaya eklenir
 NOISE_WINDOW_SEC = 15.0     # gürültü tabanı bu pencerenin alt NOISE_PERCENTILE'ından hesaplanır
@@ -85,6 +87,73 @@ class Result:
     target: str         # çeviri
     src: str = "ro"     # dil kodları
     tgt: str = "tr"
+    latency: float = 0.0  # parça kapandıktan çeviri hazır olana kadar geçen süre (sn)
+
+
+# --------------------------------------------------------------------------------------
+# Whisper "uydurma" (halüsinasyon) filtresi
+#
+# Whisper, konuşma olmayan seste (nefes, hışırtı, mikrofonun yükselttiği oda gürültüsü)
+# eğitim verisindeki video altyazılarından ezberlediği kapanış cümlelerini yazabilir:
+# "teşekkürler", "görüşürüz", "abone olun / takip edin"... ve bunları tekrar tekrar.
+# Kullanıcının gerçek ekran görüntüsünde görülen örnekler (sessiz oda, Romence):
+#   "Vă mulțumesc!" / "Aștepți, să ne vedem! Să ne vedem! Să ne vedem!"
+#   "Nu am încărți-vă, în urmărți-vă, în urmărți-vă."
+# --------------------------------------------------------------------------------------
+HALLUCINATION_PATTERNS = {
+    "ro": [r"mul[țţt]umesc", r"ne vedem", r"pe cur[aâ]nd", r"la revedere", r"vizionare",
+           r"abon[aă]", r"urm[aă]r", r"subtitr", r"pa pa"],
+    "en": [r"thank(s| you)", r"for watching", r"subscribe", r"see you", r"\bbye\b",
+           r"like and", r"subtitles?"],
+    "tr": [r"te[şs]ekk[üu]r", r"izledi[ğg]iniz", r"abone ol", r"altyaz[ıi]", r"g[öo]r[üu][şs][üu]r[üu]z",
+           r"g[öo]r[üu][şs]mek [üu]zere", r"ho[şs][çc]a kal", r"takip ed"],
+}
+SHORT_UTTERANCE_WORDS = 8      # kalıp filtresi yalnızca bu kadar kısa sözlere uygulanır
+HALLUC_MAX_VAD_SPEECH = 1.5    # ...ve VAD'in bulduğu konuşma bundan azsa
+HALLUC_MAX_LOGPROB = -0.6      # ...ya da Whisper'ın güveni bundan düşükse
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^\w\s]", "", s.lower()).strip()
+
+
+def collapse_repeats(text: str) -> str:
+    """Art arda tekrarlanan cümle/öbekleri tek kopyaya indirir.
+
+    "Să ne vedem! Să ne vedem! Să ne vedem!" -> "Să ne vedem!"
+    "în urmărți-vă, în urmărți-vă" -> "în urmărți-vă"
+    """
+    out = []
+    for sent in re.findall(r"[^.!?]+[.!?]*", text):
+        parts, kept = [p for p in sent.split(",")], []
+        for p in parts:
+            if kept and _norm(p) and _norm(p) == _norm(kept[-1]):
+                continue
+            kept.append(p)
+        sent = ",".join(kept)
+        if out and _norm(sent) and _norm(sent) == _norm(out[-1]):
+            continue
+        out.append(sent)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
+def clean_hallucinations(text: str, lang: str, vad_speech_sec: float, avg_logprob: float) -> str:
+    """Tekrarları siler; kısa ve yalnızca bilinen kalıplardan oluşan, düşük kanıtlı sözü atar.
+
+    Bilinçli ödünleşim: gerçekten tek başına söylenmiş kısa bir "Mulțumesc." da, VAD az konuşma
+    bulduysa veya Whisper emin değilse atılabilir. Uzun cümlelerin içindeki "teşekkür" vb. etkilenmez.
+    """
+    text = collapse_repeats(text)
+    if not text:
+        return ""
+    weak_evidence = vad_speech_sec < HALLUC_MAX_VAD_SPEECH or avg_logprob < HALLUC_MAX_LOGPROB
+    pats = [re.compile(p, re.IGNORECASE) for p in HALLUCINATION_PATTERNS.get(lang, [])]
+    if weak_evidence and len(_norm(text).split()) <= SHORT_UTTERANCE_WORDS and pats:
+        # 2 harften kısa parçalar ("M.K." gibi kısaltmaların harfleri) cümle sayılmaz
+        sentences = [s for s in re.findall(r"[^.!?]+", text) if len(_norm(s)) > 2]
+        if sentences and all(any(p.search(s) for p in pats) for s in sentences):
+            return ""
+    return text
 
 
 class Translator:
@@ -129,7 +198,20 @@ class Recognizer:
             cpu_threads=threads, local_files_only=True,
         )
 
+    @staticmethod
+    def speech_seconds(audio: np.ndarray) -> float:
+        """Silero VAD'e göre parçadaki toplam konuşma süresi (sn). Whisper'dan çok daha ucuzdur."""
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+        ts = get_speech_timestamps(audio, VadOptions(
+            threshold=0.5, min_speech_duration_ms=250, min_silence_duration_ms=300, speech_pad_ms=100))
+        return sum(t["end"] - t["start"] for t in ts) / SAMPLE_RATE
+
     def transcribe(self, audio: np.ndarray, language: str = "ro") -> str:
+        return self.transcribe_ex(audio, language)[0]
+
+    def transcribe_ex(self, audio: np.ndarray, language: str = "ro"):
+        """(metin, ortalama avg_logprob) döndürür. Güveni düşük / tekrarlı segmentler atılır."""
         segments, _info = self.model.transcribe(
             audio,
             language=language,
@@ -141,12 +223,16 @@ class Recognizer:
             no_speech_threshold=0.6,
             temperature=[0.0, 0.2, 0.4],
         )
-        parts = []
+        parts, logprobs = [], []
         for s in segments:
-            if s.no_speech_prob > 0.8 and s.avg_logprob < -1.0:
+            # v1.1.0'da yalnızca (no_speech > 0.8 VE logprob < -1.0) atılıyordu; sessiz odada
+            # uydurmalar bu süzgeçten geçti. Artık koşullardan HERHANGİ biri yeter.
+            if s.no_speech_prob > 0.6 or s.avg_logprob < -1.0 or s.compression_ratio > 2.4:
                 continue
             parts.append(s.text.strip())
-        return " ".join(p for p in parts if p)
+            logprobs.append(s.avg_logprob)
+        text = " ".join(p for p in parts if p)
+        return text, (float(np.mean(logprobs)) if logprobs else -10.0)
 
 
 def _resample(x: np.ndarray, sr: int) -> np.ndarray:
@@ -256,6 +342,7 @@ class Engine:
         self.translator = None
         self._loaded_whisper = None
         self.src, self.tgt = "ro", "tr"   # konuşulan dil, çeviri dili
+        self.stats = {"vad_skipped": 0, "halluc_dropped": 0}   # tanılama sayaçları
         # Tanıma ve çeviri aynı işçide sırayla çalışır; ikisi de tüm çekirdekleri kullanabilir.
         self.threads = max(1, os.cpu_count() or 2)
 
@@ -333,6 +420,7 @@ class Engine:
 
     def _run(self, sr: int):
         seg = Segmenter()
+        self.stats = {"vad_skipped": 0, "halluc_dropped": 0}
 
         def segment_loop():
             last_level = 0.0
@@ -344,14 +432,14 @@ class Engine:
                         break
                     continue
                 for c in seg.push(_resample(x, sr)):
-                    self._chunk_q.put(c)
+                    self._chunk_q.put((*c, time.monotonic()))   # kapanış anı: gecikme ölçümü için
                     self.events.put(("backlog", self._chunk_q.qsize()))
                 now = time.monotonic()
                 if now - last_level > 0.1:
                     self.events.put(("level", seg.level))
                     last_level = now
             for c in seg.flush():
-                self._chunk_q.put(c)
+                self._chunk_q.put((*c, time.monotonic()))
             self._chunk_q.put(None)  # işçiye bitiş sinyali
 
         self._threads = [
@@ -369,15 +457,26 @@ class Engine:
                 self.events.put(("status", "Durduruldu."))
                 self.events.put(("done", None))
                 return
-            t0, t1, audio = item
+            t0, t1, audio, closed_at = item
             self.events.put(("backlog", self._chunk_q.qsize()))
             src, tgt = self.src, self.tgt   # oturum boyunca sabit (arayüz kayıtta seçimi kilitler)
             try:
-                text = self.recognizer.transcribe(audio, language=src)
-                if not text:
+                # 1) Ucuz kapı: içinde gerçek konuşma yoksa Whisper'a hiç gönderme.
+                #    Hem uydurmayı hem işlemci yükünü (ve dolayısıyla gecikmeyi) azaltır.
+                speech = self.recognizer.speech_seconds(audio)
+                if speech < MIN_VAD_SPEECH_SEC:
+                    self.stats["vad_skipped"] += 1
                     continue
-                out = self.translator.translate(text, src, tgt)
-                self.events.put(("result", Result(t0, t1, text, out, src, tgt)))
+                # 2) Tanıma + uydurma filtresi
+                text, logprob = self.recognizer.transcribe_ex(audio, language=src)
+                cleaned = clean_hallucinations(text, src, speech, logprob)
+                if not cleaned:
+                    if text:
+                        self.stats["halluc_dropped"] += 1
+                    continue
+                out = self.translator.translate(cleaned, src, tgt)
+                self.events.put(("result", Result(t0, t1, cleaned, out, src, tgt,
+                                                  latency=time.monotonic() - closed_at)))
             except Exception as e:  # bir parçadaki hata tüm oturumu düşürmesin
                 self.events.put(("error", f"İşleme hatası: {e}"))
 

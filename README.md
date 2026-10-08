@@ -66,6 +66,13 @@ Sağ alttaki **"Sırada bekleyen"** sayısı sürekli artıyorsa bilgisayar konu
   Romence çok az).
 - Gürültülü ortam, uzak mikrofon ve aynı anda konuşan kişiler tanıma kalitesini düşürür.
 - Bu bir "simültane çeviri" değildir: konuşmacı durakladıkça parça parça çevirir.
+- **Gecikme** çoğunlukla bilgisayarın Whisper'ı çalıştırma hızına bağlıdır; Whisper her parçayı
+  30 saniyeye tamamlayarak işler, bu yüzden kısa bir cümle de uzun bir cümle kadar sürer.
+  Sağ alttaki **"Gecikme"** göstergesi her cümlenin konuşma bittikten kaç saniye sonra geldiğini
+  gösterir. Çok yüksekse **Hızlı (small)** modu yaklaşık 3 kat daha hızlıdır (ama daha çok hata yapar).
+- **Uydurma filtresi:** Whisper, konuşma olmayan seste "teşekkürler / görüşürüz / abone olun"
+  gibi ezber cümleler yazabilir. Uygulama bunları elemeye çalışır; yan etkisi olarak tek başına
+  söylenmiş kısa ve zor duyulan bir "teşekkürler" de elenebilir.
 
 ---
 

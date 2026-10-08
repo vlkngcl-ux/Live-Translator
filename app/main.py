@@ -102,6 +102,9 @@ class App:
             side="left", fill="x", expand=True, padx=8, pady=3)
         self.backlog = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.backlog, anchor="e").pack(side="right", padx=8)
+        # Son cümlenin gecikmesi: konuşma bittikten çevirinin ekrana gelmesine kadar geçen süre
+        self.latency_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.latency_var, anchor="e").pack(side="right", padx=8)
 
         opts = ttk.Frame(self.root)
         opts.pack(fill="x", side="bottom", **pad)
@@ -223,6 +226,10 @@ class App:
             w.state(["!disabled", "readonly"])
         self.backlog.set("")
         self._draw_level(0)
+        st = self.engine.stats
+        if st.get("vad_skipped") or st.get("halluc_dropped"):
+            self.status.set(f"Durduruldu. (Konuşma içermeyen {st['vad_skipped']} ses parçası ve "
+                            f"{st['halluc_dropped']} olası uydurma metin elendi.)")
 
     # ---------------- olay döngüsü ----------------
     def _poll(self):
@@ -237,6 +244,8 @@ class App:
                 elif kind == "result":
                     self.results.append(val)
                     self._append(val)
+                    if val.latency:
+                        self.latency_var.set(f"Gecikme: {val.latency:.1f} sn".replace(".", ","))
                 elif kind == "error":
                     self.status.set(val)
                 elif kind == "level":

@@ -38,6 +38,7 @@ def main():
     src = sys.argv[3] if len(sys.argv) > 3 else "ro"
     tgt = sys.argv[4] if len(sys.argv) > 4 else "tr"
     noise = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0003
+    realtime = len(sys.argv) > 6 and sys.argv[6] == "rt"   # mikrofon gibi gerçek hızda akıt
     audio, bounds = build_ambient(wav_dir, noise)
     print(f"Toplam kayıt: {len(audio) / SAMPLE_RATE:.1f} sn, {len(bounds)} konuşma")
     for b in bounds:
@@ -49,19 +50,19 @@ def main():
     eng.load(models_dir() / f"whisper-{key}")
     print(f"Model yükleme: {time.time() - t0:.1f} sn")
     t0 = time.time()
-    eng.start_from_array(audio, SAMPLE_RATE)
+    eng.start_from_array(audio, SAMPLE_RATE, realtime=realtime)
     n = 0
     while True:
         kind, val = eng.events.get()
         if kind == "result":
             n += 1
-            print(f"\n[{val.t_start:.1f}-{val.t_end:.1f}s]\n  {val.src.upper()}: {val.source}"
+            print(f"\n[{val.t_start:.1f}-{val.t_end:.1f}s] gecikme={val.latency:.1f}s\n  {val.src.upper()}: {val.source}"
                   f"\n  {val.tgt.upper()}: {val.target}")
         elif kind == "error":
             print("HATA:", val)
         elif kind == "done":
             break
-    print(f"\n{n} sonuç, işlem süresi {time.time() - t0:.1f} sn")
+    print(f"\n{n} sonuç, işlem süresi {time.time() - t0:.1f} sn, elenen: {eng.stats}")
 
 
 if __name__ == "__main__":
