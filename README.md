@@ -73,12 +73,24 @@ Sağ alttaki **"Sırada bekleyen"** sayısı sürekli artıyorsa bilgisayar konu
 
 Kurulum dosyaları GitHub Actions ile otomatik üretilir; kendi bilgisayarınızda derleme gerekmez.
 
-1. Bu klasörün içeriğini yeni bir GitHub deposuna yükleyin (`models/` klasörü gerekmez).
-2. Depoda **Actions** sekmesi → **"Kurulum dosyalarını oluştur"** → **Run workflow**.
-3. İlk çalıştırmada modeller indirilip dönüştürülür. Sonraki çalıştırmalarda önbellekten gelir.
-4. Her sistemde paketlenmiş uygulama, gerçek Romence, İngilizce ve Türkçe ses kayıtlarını **offline** tanıyıp
-   çeviren bir kendi kendine testten geçer. Test başarısız olursa dosya yayınlanmaz.
-5. Bittiğinde **Releases** sayfasında `.exe` ve `.dmg` dosyaları belirir.
+**Otomatik:** `main` dalına uygulamayı etkileyen bir değişiklik (`app/`, `build/`, `installer/`,
+`scripts/`, `requirements.txt`, `VERSION` veya iş akışı dosyası) gönderildiğinde derleme kendiliğinden
+başlar. Sürüm numarası `VERSION` dosyasından alınır.
+
+- **Yeni sürüm çıkarmak için `VERSION`'ı artırın** (ör. `1.1.0` → `1.1.1`). O sürüm zaten
+  yayınlanmışsa otomatik derleme üzerine yazmaz, hata verip durur.
+- Yalnızca README gibi dosyalar değişirse derleme başlamaz.
+- Bir gönderimde derleme istemiyorsanız commit mesajına `[skip ci]` yazın.
+
+**Elle:** Actions → **"Kurulum dosyalarını oluştur"** → **Run workflow** (sürüm kutusu boş = `VERSION`).
+⚠️ Eski bir çalışmadaki **"Re-run jobs"** düğmesi o çalışmanın **eski kodunu** yeniden derler; yeni kod
+için her zaman **Run workflow** kullanın.
+
+Her derlemede:
+1. İlk çalıştırmada modeller indirilip dönüştürülür; sonra önbellekten gelir.
+2. Her sistemde paketlenmiş uygulama, gerçek Romence, İngilizce ve Türkçe ses kayıtlarını **offline**
+   tanıyıp çeviren bir kendi kendine testten geçer. Test başarısız olursa dosya yayınlanmaz.
+3. Bittiğinde **Releases** sayfasında `v<sürüm>` altında `.exe` ve `.dmg` dosyaları belirir.
 
 ### Yerelde çalıştırma (geliştirme)
 

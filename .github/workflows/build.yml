@@ -1,19 +1,37 @@
 name: Kurulum dosyalarını oluştur
 
-# Çalıştırma: GitHub'da Actions → "Kurulum dosyalarını oluştur" → Run workflow
-# (veya v1.0.0 gibi bir etiket gönderin). Sonuç Releases sayfasına yüklenir.
+# Ne zaman çalışır?
+#  - OTOMATİK: main dalına uygulamayı etkileyen bir değişiklik gönderildiğinde.
+#    Sürüm numarası depodaki VERSION dosyasından alınır. O sürüm zaten yayınlanmışsa
+#    üzerine YAZMAZ, hata verip durur: yeni sürüm için önce VERSION'ı artırın.
+#  - ELLE: Actions → "Kurulum dosyalarını oluştur" → Run workflow (sürüm boş bırakılırsa
+#    VERSION kullanılır; elle verilen sürüm mevcutsa bilerek üzerine yazılır).
+# Sonuç Releases sayfasına "v<sürüm>" olarak yüklenir.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Sürüm numarası (ör. 1.0.0)"
-        required: true
-        default: "1.0.0"
+        description: "Sürüm numarası (boş = VERSION dosyası). Mevcut bir sürüm yazılırsa üzerine yazılır."
+        required: false
+        default: ""
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths:
+      - "app/**"
+      - "build/**"
+      - "installer/**"
+      - "scripts/**"
+      - "requirements.txt"
+      - "VERSION"
+      - ".github/workflows/build.yml"
 
 permissions:
   contents: write   # Release oluşturup dosya yükleyebilmek için
+
+# Aynı daldaki eski bir derleme hâlâ sürüyorsa iptal et; yalnızca en son kod derlensin.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   WHISPER_SIZES: "large-v3-turbo,small"
@@ -21,8 +39,34 @@ env:
   MODELS_KEY: models-v2-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr
 
 jobs:
+  version:
+    name: Sürümü belirle
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          V="$INPUT_VERSION"
+          if [ -z "$V" ]; then V="$(tr -d ' \r\n' < VERSION)"; fi
+          if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Geçersiz sürüm: '$V' (biçim: 1.2.3)"; exit 1
+          fi
+          if [ "${{ github.event_name }}" = "push" ] && gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$V zaten yayınlanmış. Üzerine yazmamak için durduruldu. VERSION dosyasını artırın (ör. 1.1.1)."
+            exit 1
+          fi
+          echo "Sürüm: $V (commit ${GITHUB_SHA::7})"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
   models:
     name: Modelleri hazırla
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +89,7 @@ jobs:
 
   build:
     name: Derle (${{ matrix.name }})
-    needs: models
+    needs: [version, models]
     strategy:
       fail-fast: false
       matrix:
@@ -76,12 +120,9 @@ jobs:
           pip install -r requirements.txt pyinstaller==6.22.3
           python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
-      - name: Sürümü belirle
+      - name: Sürümü ayarla
         shell: bash
-        run: |
-          V="${{ github.event.inputs.version }}"
-          if [ -z "$V" ]; then V="${GITHUB_REF_NAME#v}"; fi
-          echo "VERSION=$V" >> "$GITHUB_ENV"
+        run: echo "VERSION=${{ needs.version.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Uygulamayı paketle
         run: pyinstaller build/app.spec --noconfirm --workpath pyi-work
