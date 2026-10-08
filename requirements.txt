@@ -1,0 +1,6 @@
+# Uygulamanın çalışma zamanı bağımlılıkları (torch / transformers YOK; paket küçük kalsın diye)
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+sentencepiece==0.2.1
+sounddevice==0.5.3
+numpy>=1.26,<3

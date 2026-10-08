@@ -1,0 +1,13 @@
+# Modeller depoya girmez; CI'da scripts/prepare_models.py ile üretilir
+models/
+
+# Derleme çıktıları
+dist/
+dist-installer/
+pyi-work/
+dmg/
+selftest.json
+
+__pycache__/
+*.pyc
+.DS_Store

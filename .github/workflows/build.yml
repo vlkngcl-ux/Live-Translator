@@ -1,0 +1,140 @@
+name: Kurulum dosyalarını oluştur
+
+# Çalıştırma: GitHub'da Actions → "Kurulum dosyalarını oluştur" → Run workflow
+# (veya v1.0.0 gibi bir etiket gönderin). Sonuç Releases sayfasına yüklenir.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Sürüm numarası (ör. 1.0.0)"
+        required: true
+        default: "1.0.0"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # Release oluşturup dosya yükleyebilmek için
+
+env:
+  WHISPER_SIZES: "large-v3-turbo,small"
+  # Modeller veya dönüştürücü sürümü değişirse bu anahtarı değiştirin (önbellek yenilenir).
+  MODELS_KEY: models-v1-turbo-small-nllb600m-ct2-4.8.2
+
+jobs:
+  models:
+    name: Modelleri hazırla
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: ${{ env.MODELS_KEY }}
+          enableCrossOsArchive: true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Modelleri indir ve int8'e çevir
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install ctranslate2==4.8.2 transformers==4.57.6 sentencepiece soundfile huggingface_hub
+          python scripts/prepare_models.py "$WHISPER_SIZES"
+
+  build:
+    name: Derle (${{ matrix.name }})
+    needs: models
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Modelleri önbellekten al
+        uses: actions/cache/restore@v4
+        with:
+          path: models
+          key: ${{ env.MODELS_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bağımlılıkları kur
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.22.3
+          python -c "import tkinter; print('Tk', tkinter.TkVersion)"
+
+      - name: Sürümü belirle
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then V="${GITHUB_REF_NAME#v}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Uygulamayı paketle
+        run: pyinstaller build/app.spec --noconfirm --workpath pyi-work
+
+      # Paketlenmiş uygulama gerçek bir Romence kaydı offline tanıyıp çeviriyor mu?
+      - name: Kendi kendine test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\CanliCevirmen\CanliCevirmen.exe" `
+                -ArgumentList "--selftest","selftest.json","models\selftest_ro.npy" -Wait -PassThru
+          Get-Content selftest.json -Encoding UTF8
+          if ($p.ExitCode -ne 0) { throw "Selftest başarısız (çıkış kodu $($p.ExitCode))" }
+
+      - name: Kendi kendine test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set +e
+          dist/CanliCevirmen.app/Contents/MacOS/CanliCevirmen --selftest selftest.json models/selftest_ro.npy
+          code=$?
+          cat selftest.json
+          exit $code
+
+      - name: Kurulum dosyası (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $default = "${env:ProgramFiles(x86)}\Inno Setup 6"
+            if (-not (Test-Path "$default\ISCC.exe")) { choco install innosetup -y --no-progress }
+            $env:PATH += ";$default"
+          }
+          iscc /DAppVersion=$env:VERSION installer\windows.iss
+          Get-ChildItem dist-installer
+
+      - name: Kurulum dosyası (macOS .dmg)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dmg dist-installer
+          cp -R dist/CanliCevirmen.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Canli Cevirmen" -srcfolder dmg -ov -format UDZO \
+            dist-installer/CanliCevirmen-macOS-AppleSilicon.dmg
+          ls -lh dist-installer
+
+      - name: Release'e yükle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$VERSION"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Canlı Çevirmen $VERSION" \
+              --notes "Windows: CanliCevirmen-Setup-Windows.exe — macOS (M1/M2/M3/M4): CanliCevirmen-macOS-AppleSilicon.dmg. Kurulum talimatı için README'ye bakın." \
+            || true
+          for f in dist-installer/*; do gh release upload "$TAG" "$f" --clobber; done

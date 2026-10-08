@@ -1,2 +1,104 @@
-# Live-Translator
-Live Translation Tool
+# Canlı Çevirmen (Romence → Türkçe)
+
+Ortamdaki Romence konuşmayı mikrofondan dinler, **Türkçe metin** olarak ekranda gösterir ve
+**TXT** ya da **DOCX** olarak kaydetmenizi sağlar. **Tamamen offline çalışır**: kurulumdan sonra
+internet gerekmez, ses hiçbir yere gönderilmez.
+
+- Konuşma tanıma: OpenAI Whisper (large-v3-turbo ve small), CTranslate2 int8
+- Çeviri: Meta NLLB-200 (600M), doğrudan Romence → Türkçe, CTranslate2 int8
+
+## Desteklenen sistemler
+
+| Sistem | Durum |
+|---|---|
+| Windows 10/11 (64-bit) | Desteklenir |
+| macOS 11+ — Apple Silicon (M1/M2/M3/M4) | Desteklenir |
+| macOS — Intel işlemcili Mac | **Desteklenmez** (çeviri motorunun Intel Mac paketi yok) |
+
+Kurulum boyutu yaklaşık 1,5–2 GB'tır (modeller dahil).
+
+---
+
+## Kullanıcı için kurulum
+
+Kurulum dosyaları GitHub'daki **Releases** sayfasındadır.
+
+### Windows
+1. `CanliCevirmen-Setup-Windows.exe` dosyasını indirip çalıştırın.
+2. Windows "bilinmeyen yayımcı" uyarısı verirse **Ek bilgi → Yine de çalıştır** deyin
+   (uygulama imzalı değildir).
+3. Yönetici izni gerekmez. Başlat menüsünde ve masaüstünde "Canlı Çevirmen" oluşur.
+
+### macOS (Apple Silicon)
+1. `CanliCevirmen-macOS-AppleSilicon.dmg` dosyasını açın, uygulamayı **Applications**
+   klasörüne sürükleyin.
+2. İlk açılışta macOS "geliştirici doğrulanamadı" diyebilir (uygulama Apple hesabıyla imzalı
+   değildir). Bu durumda: **Sistem Ayarları → Gizlilik ve Güvenlik** sayfasının altındaki
+   **"Yine de Aç"** düğmesine basın.
+3. Mikrofon izni sorulduğunda **İzin Ver** deyin. Yanlışlıkla reddettiyseniz:
+   Sistem Ayarları → Gizlilik ve Güvenlik → Mikrofon → Canlı Çevirmen'i açın.
+
+## Kullanım
+
+1. **Mikrofon** listesinden kullanılacak mikrofonu seçin.
+2. **Mod**:
+   - **Doğru (turbo)**: daha isabetli, daha çok işlemci ister (varsayılan).
+   - **Hızlı (small)**: zayıf bilgisayarlar için; hatalar daha fazladır.
+3. **▶ Başlat**. Konuşma cümle cümle, birkaç saniye gecikmeyle Türkçe olarak görünür.
+4. **■ Durdur** dediğinizde sırada kalan konuşma da işlenir.
+5. **TXT kaydet** / **DOCX kaydet** ile metni kaydedin.
+   "Romence aslını da göster/kaydet" işaretliyse orijinal Romence metin de eklenir.
+
+Sağ alttaki **"Sırada bekleyen"** sayısı sürekli artıyorsa bilgisayar konuşmaya yetişemiyordur;
+**Hızlı (small)** moduna geçin.
+
+## Bilinen sınırlar
+
+- Çeviri makine çevirisidir; özel isimler, rakamlar ve uzun cümlelerde hata yapabilir.
+  Önemli metinleri Romence aslıyla karşılaştırın.
+- Gürültülü ortam, uzak mikrofon ve aynı anda konuşan kişiler tanıma kalitesini düşürür.
+- Bu bir "simültane çeviri" değildir: konuşmacı durakladıkça parça parça çevirir.
+
+---
+
+## Kurulum dosyalarını üretmek (geliştirici)
+
+Kurulum dosyaları GitHub Actions ile otomatik üretilir; kendi bilgisayarınızda derleme gerekmez.
+
+1. Bu klasörün içeriğini yeni bir GitHub deposuna yükleyin (`models/` klasörü gerekmez).
+2. Depoda **Actions** sekmesi → **"Kurulum dosyalarını oluştur"** → **Run workflow**.
+3. İlk çalıştırmada modeller indirilip dönüştürülür. Sonraki çalıştırmalarda önbellekten gelir.
+4. Her sistemde paketlenmiş uygulama, gerçek bir Romence ses kaydını **offline** tanıyıp
+   çeviren bir kendi kendine testten geçer. Test başarısız olursa dosya yayınlanmaz.
+5. Bittiğinde **Releases** sayfasında `.exe` ve `.dmg` dosyaları belirir.
+
+### Yerelde çalıştırma (geliştirme)
+
+```bash
+pip install -r requirements.txt
+pip install torch --index-url https://download.pytorch.org/whl/cpu    # yalnızca model dönüştürme için
+pip install ctranslate2==4.8.2 transformers==4.57.6 soundfile
+python scripts/prepare_models.py          # models/ klasörünü oluşturur (internet gerekir)
+python app/main.py
+```
+
+Test (mikrofonsuz): `python tests/test_engine.py <romence_wav_klasoru> large-v3-turbo`
+
+## Proje yapısı
+
+```
+app/main.py                  Arayüz (tkinter)
+app/engine.py                Mikrofon, konuşma bölme, tanıma, çeviri
+app/export.py                TXT / DOCX kaydetme (ek kütüphane gerektirmez)
+scripts/prepare_models.py    Modelleri indirip int8'e çevirir (yalnızca derlemede)
+build/app.spec               PyInstaller paket tanımı
+installer/windows.iss        Windows kurulum sihirbazı (Inno Setup)
+.github/workflows/build.yml  Otomatik derleme + test + yayın
+```
+
+## Lisanslar
+
+- **NLLB-200** (çeviri modeli): CC-BY-NC 4.0, **yalnızca ticari olmayan kullanım.**
+  Ticari kullanım gerekirse çeviri modeli değiştirilmelidir.
+- **Whisper** (konuşma tanıma modeli): MIT.
+- CI testindeki örnek ses: Google FLEURS veri seti (CC-BY 4.0); uygulama paketine dahil edilmez.
