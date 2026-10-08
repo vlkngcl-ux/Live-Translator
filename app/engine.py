@@ -1,4 +1,6 @@
-"""Ses yakalama, konuşma bölme, Romence tanıma (Whisper) ve Türkçe çeviri (NLLB).
+"""Ses yakalama, konuşma bölme, konuşma tanıma (Whisper) ve çeviri (NLLB).
+
+Diller: Romence, İngilizce, Türkçe (her yönde).
 
 Tamamen offline çalışır: modeller uygulama klasöründen yüklenir, ağa çıkılmaz.
 """
@@ -9,6 +11,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
+import collections
 import queue
 import sys
 import threading
@@ -25,7 +28,11 @@ FRAME_SEC = 0.03            # enerji ölçüm penceresi
 MIN_CHUNK_SEC = 4.0         # bu süreden kısa parçalar, sessizlik olsa bile bekletilir
 MAX_CHUNK_SEC = 20.0        # bu süreye ulaşan parça zorla gönderilir (Whisper sınırı 30 sn)
 SILENCE_END_SEC = 0.7       # konuşmadan sonra bu kadar sessizlik -> parçayı kapat
-MIN_SPEECH_SEC = 0.6        # toplam konuşma bundan azsa parça atılır (gürültü)
+MIN_SPEECH_SEC = 0.3        # toplam konuşma bundan azsa parça atılır (gürültüyü Whisper VAD ayrıca eler)
+PREROLL_SEC = 0.3           # konuşma başlamadan önceki bu kadar ses de parçaya eklenir
+NOISE_WINDOW_SEC = 15.0     # gürültü tabanı bu pencerenin alt NOISE_PERCENTILE'ından hesaplanır
+NOISE_PERCENTILE = 5        # (aralıksız konuşmada bile kelime arası sessizlikler bu dilime düşer)
+SPEECH_RMS_FLOOR = 0.0008   # mutlak alt eşik (eskiden 0.006 idi; kısık kayıtları kaçırıyordu)
 
 
 def resource_dir() -> Path:
@@ -54,22 +61,37 @@ def available_whisper_models():
     return found
 
 
+# Desteklenen diller: kod -> (Türkçe ad, kısaltma, NLLB kodu). Whisper ISO kodunu kullanır.
+LANGUAGES = {
+    "ro": ("Romence", "RO", "ron_Latn"),
+    "en": ("İngilizce", "EN", "eng_Latn"),
+    "tr": ("Türkçe", "TR", "tur_Latn"),
+}
+
+
+def lang_name(code: str) -> str:
+    return LANGUAGES[code][0]
+
+
+def lang_short(code: str) -> str:
+    return LANGUAGES[code][1]
+
+
 @dataclass
 class Result:
     t_start: float      # kayıt başlangıcına göre saniye
     t_end: float
-    romanian: str
-    turkish: str
+    source: str         # konuşulan dildeki metin
+    target: str         # çeviri
+    src: str = "ro"     # dil kodları
+    tgt: str = "tr"
 
 
 class Translator:
-    """NLLB-200 (CTranslate2, int8) ile Romence -> Türkçe çeviri.
+    """NLLB-200 (CTranslate2, int8) ile diller arası çeviri (RO / EN / TR, her yönde).
 
     transformers/torch kullanmamak için tokenizasyon doğrudan sentencepiece ile yapılır.
     """
-
-    SRC = "ron_Latn"
-    TGT = "tur_Latn"
 
     def __init__(self, model_path: Path, threads: int):
         import ctranslate2
@@ -82,21 +104,22 @@ class Translator:
         self.sp = spm.SentencePieceProcessor(
             model_file=str(model_path / "sentencepiece.bpe.model"))
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str, src: str = "ro", tgt: str = "tr") -> str:
         text = text.strip()
-        if not text:
-            return ""
-        tokens = [self.SRC] + self.sp.encode(text, out_type=str) + ["</s>"]
+        if not text or src == tgt:
+            return text
+        s, t = LANGUAGES[src][2], LANGUAGES[tgt][2]
+        tokens = [s] + self.sp.encode(text, out_type=str) + ["</s>"]
         res = self.model.translate_batch(
-            [tokens], target_prefix=[[self.TGT]], beam_size=2,
+            [tokens], target_prefix=[[t]], beam_size=2,
             max_decoding_length=400, repetition_penalty=1.1,
         )
-        out = [t for t in res[0].hypotheses[0] if t not in (self.TGT, "</s>")]
+        out = [tok for tok in res[0].hypotheses[0] if tok not in (t, "</s>")]
         return self.sp.decode(out).strip()
 
 
 class Recognizer:
-    """faster-whisper ile Romence konuşma tanıma."""
+    """faster-whisper ile konuşma tanıma (dil sabitlenir; otomatik algılama yok)."""
 
     def __init__(self, model_path: Path, threads: int):
         from faster_whisper import WhisperModel
@@ -106,10 +129,10 @@ class Recognizer:
             cpu_threads=threads, local_files_only=True,
         )
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, language: str = "ro") -> str:
         segments, _info = self.model.transcribe(
             audio,
-            language="ro",
+            language=language,
             task="transcribe",
             beam_size=1,                           # anlık kullanım için hız; kalite farkı testte küçüktü
             vad_filter=True,                       # gürültü/sessizlikte uydurmayı azaltır
@@ -149,14 +172,26 @@ class Segmenter:
         self.speech_frames = 0
         self.silence_run = 0
         self.t = 0.0                                   # işlenen toplam süre (sn)
-        self.noise = 0.003                             # uyarlanabilir gürültü tabanı
+        self.noise = 0.001                             # uyarlanabilir gürültü tabanı (hızla uyum sağlar)
         self.level = 0.0                               # arayüz için son ses seviyesi
+        self.preroll = collections.deque(maxlen=int(PREROLL_SEC / FRAME_SEC))
+        self.hist = collections.deque(maxlen=int(NOISE_WINDOW_SEC / FRAME_SEC))
+        self._n = 0
 
-    def _is_speech(self, rms: float) -> bool:
-        # Gürültü tabanını yavaşça takip et (yalnızca sessiz görünen çerçevelerde).
-        if rms < self.noise * 2.5:
-            self.noise = 0.97 * self.noise + 0.03 * max(rms, 1e-4)
-        return rms > max(self.noise * 3.0, 0.006)
+    def _is_speech(self, rms: float, in_chunk: bool) -> bool:
+        # Gürültü tabanı = son NOISE_WINDOW_SEC'teki çerçevelerin alt yüzdeliği. Kelime ve cümle
+        # aralarındaki sessizlikler bu dilime düştüğü için konuşma gürültü tahminini yukarı çekmez.
+        self.hist.append(rms)
+        self._n += 1
+        if self._n % 10 == 0 or len(self.hist) < 10:
+            self.noise = max(float(np.percentile(self.hist, NOISE_PERCENTILE)), 1e-4)
+        # Histerezis: konuşmayı BAŞLATMAK için yüksek eşik, cümlenin İÇİNDE devam etmek için
+        # düşük eşik — kısık heceler cümleyi erken kesmesin.
+        # Alt sınır bilerek çok düşük: kısık mikrofon / uzaktaki konuşmacı da yakalansın.
+        # Yanlışlıkla yakalanan gürültüyü Whisper'ın VAD filtresi zaten eler.
+        if in_chunk:
+            return rms > max(self.noise * 1.8, SPEECH_RMS_FLOOR * 0.75)
+        return rms > max(self.noise * 3.0, SPEECH_RMS_FLOOR)
 
     def push(self, samples: np.ndarray):
         """Ses ekle; tamamlanan parçaları (başlangıç, bitiş, ses) olarak döndür."""
@@ -166,13 +201,17 @@ class Segmenter:
             f, self.buf = self.buf[: self.frame], self.buf[self.frame:]
             rms = float(np.sqrt(np.mean(f * f)))
             self.level = rms
-            speech = self._is_speech(rms)
+            speech = self._is_speech(rms, in_chunk=bool(self.chunk))
             if not self.chunk:
                 if speech:
-                    self.chunk_start = self.t
-                    self.chunk = [f]
+                    # Ön tampon: eşiği aşmadan hemen önceki sesi de ekle (ilk hece kaybolmasın).
+                    self.chunk_start = max(0.0, self.t - len(self.preroll) * FRAME_SEC)
+                    self.chunk = list(self.preroll) + [f]
+                    self.preroll.clear()
                     self.speech_frames = 1
                     self.silence_run = 0
+                else:
+                    self.preroll.append(f)
             else:
                 self.chunk.append(f)
                 if speech:
@@ -216,6 +255,7 @@ class Engine:
         self.recognizer = None
         self.translator = None
         self._loaded_whisper = None
+        self.src, self.tgt = "ro", "tr"   # konuşulan dil, çeviri dili
         # Tanıma ve çeviri aynı işçide sırayla çalışır; ikisi de tüm çekirdekleri kullanabilir.
         self.threads = max(1, os.cpu_count() or 2)
 
@@ -242,6 +282,13 @@ class Engine:
         except Exception:
             default = None
         return devs, default
+
+    def set_languages(self, src: str, tgt: str):
+        if src not in LANGUAGES or tgt not in LANGUAGES:
+            raise ValueError(f"Desteklenmeyen dil: {src} → {tgt}")
+        if src == tgt:
+            raise ValueError("Konuşulan dil ile çeviri dili aynı olamaz.")
+        self.src, self.tgt = src, tgt
 
     def start(self, device=None):
         import sounddevice as sd
@@ -324,12 +371,13 @@ class Engine:
                 return
             t0, t1, audio = item
             self.events.put(("backlog", self._chunk_q.qsize()))
+            src, tgt = self.src, self.tgt   # oturum boyunca sabit (arayüz kayıtta seçimi kilitler)
             try:
-                ro = self.recognizer.transcribe(audio)
-                if not ro:
+                text = self.recognizer.transcribe(audio, language=src)
+                if not text:
                     continue
-                tr = self.translator.translate(ro)
-                self.events.put(("result", Result(t0, t1, ro, tr)))
+                out = self.translator.translate(text, src, tgt)
+                self.events.put(("result", Result(t0, t1, text, out, src, tgt)))
             except Exception as e:  # bir parçadaki hata tüm oturumu düşürmesin
                 self.events.put(("error", f"İşleme hatası: {e}"))
 

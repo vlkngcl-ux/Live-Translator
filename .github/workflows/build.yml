@@ -18,7 +18,7 @@ permissions:
 env:
   WHISPER_SIZES: "large-v3-turbo,small"
   # Modeller veya dönüştürücü sürümü değişirse bu anahtarı değiştirin (önbellek yenilenir).
-  MODELS_KEY: models-v1-turbo-small-nllb600m-ct2-4.8.2
+  MODELS_KEY: models-v2-turbo-small-nllb600m-ct2-4.8.2-ro-en-tr
 
 jobs:
   models:
@@ -92,7 +92,7 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process -FilePath "dist\CanliCevirmen\CanliCevirmen.exe" `
-                -ArgumentList "--selftest","selftest.json","models\selftest_ro.npy" -Wait -PassThru
+                -ArgumentList "--selftest","selftest.json","models" -Wait -PassThru
           Get-Content selftest.json -Encoding UTF8
           if ($p.ExitCode -ne 0) { throw "Selftest başarısız (çıkış kodu $($p.ExitCode))" }
 
@@ -100,7 +100,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set +e
-          dist/CanliCevirmen.app/Contents/MacOS/CanliCevirmen --selftest selftest.json models/selftest_ro.npy
+          dist/CanliCevirmen.app/Contents/MacOS/CanliCevirmen --selftest selftest.json models
           code=$?
           cat selftest.json
           exit $code

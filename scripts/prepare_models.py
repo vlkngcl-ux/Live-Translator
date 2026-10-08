@@ -1,6 +1,6 @@
 """Modelleri indirip CTranslate2 int8 biçimine çevirir (yalnızca derleme sırasında, internetle).
 
-Çıktı:  models/whisper-<boyut>/   models/nllb/   models/selftest_ro.npy
+Çıktı:  models/whisper-<boyut>/   models/nllb/   models/selftest_{ro,en,tr}.npy
 Kullanım: python scripts/prepare_models.py [whisper boyutları, virgüllü]  (varsayılan: large-v3-turbo,small)
 
 Gerekenler (yalnızca bu betik için): ctranslate2 transformers torch sentencepiece soundfile huggingface_hub
@@ -29,14 +29,14 @@ def convert(model_id: str, out: Path, copy_files):
     subprocess.run(cmd, check=True)
 
 
-def selftest_audio(dst: Path):
-    """CI'daki --selftest için gerçek bir Romence konuşma örneği (Google FLEURS, CC-BY 4.0)."""
+def selftest_audio(fleurs_lang: str, dst: Path):
+    """CI'daki --selftest için gerçek bir konuşma örneği (Google FLEURS, CC-BY 4.0)."""
     if dst.exists():
         return
     import numpy as np
     import soundfile as sf
 
-    url = "https://huggingface.co/datasets/google/fleurs/resolve/main/data/ro_ro/audio/dev.tar.gz"
+    url = f"https://huggingface.co/datasets/google/fleurs/resolve/main/data/{fleurs_lang}/audio/dev.tar.gz"
     with urllib.request.urlopen(url) as r, tarfile.open(fileobj=r, mode="r|gz") as t:
         for m in t:
             if m.isfile() and m.name.endswith(".wav"):
@@ -55,7 +55,8 @@ def main():
         convert(f"openai/whisper-{s}", MODELS / f"whisper-{s}",
                 ["tokenizer.json", "preprocessor_config.json"])
     convert("facebook/nllb-200-distilled-600M", MODELS / "nllb", ["sentencepiece.bpe.model"])
-    selftest_audio(MODELS / "selftest_ro.npy")
+    for code, fleurs_lang in (("ro", "ro_ro"), ("en", "en_us"), ("tr", "tr_tr")):
+        selftest_audio(fleurs_lang, MODELS / f"selftest_{code}.npy")
     shutil.rmtree(MODELS / ".cache", ignore_errors=True)
     for p in sorted(MODELS.iterdir()):
         size = sum(f.stat().st_size for f in p.rglob("*")) if p.is_dir() else p.stat().st_size

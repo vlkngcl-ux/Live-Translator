@@ -1,5 +1,5 @@
 # Modeller depoya girmez; CI'da scripts/prepare_models.py ile üretilir
-models/
+models
 
 # Derleme çıktıları
 dist/

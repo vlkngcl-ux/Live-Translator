@@ -1,11 +1,14 @@
-# Canlı Çevirmen (Romence → Türkçe)
+# Canlı Çevirmen (Romence · İngilizce · Türkçe)
 
-Ortamdaki Romence konuşmayı mikrofondan dinler, **Türkçe metin** olarak ekranda gösterir ve
-**TXT** ya da **DOCX** olarak kaydetmenizi sağlar. **Tamamen offline çalışır**: kurulumdan sonra
+Ortamdaki konuşmayı mikrofondan dinler, seçtiğiniz dile çevirip **metin** olarak ekranda gösterir
+ve **TXT** ya da **DOCX** olarak kaydetmenizi sağlar. **Tamamen offline çalışır**: kurulumdan sonra
 internet gerekmez, ses hiçbir yere gönderilmez.
 
+**Dil çiftleri:** Romence → Türkçe, Romence → İngilizce, İngilizce → Romence,
+İngilizce → Türkçe, Türkçe → İngilizce, Türkçe → Romence (üç dilin her yönü).
+
 - Konuşma tanıma: OpenAI Whisper (large-v3-turbo ve small), CTranslate2 int8
-- Çeviri: Meta NLLB-200 (600M), doğrudan Romence → Türkçe, CTranslate2 int8
+- Çeviri: Meta NLLB-200 (600M), dil çiftleri arasında doğrudan çeviri (aradan dil kullanmaz), CTranslate2 int8
 
 ## Desteklenen sistemler
 
@@ -41,13 +44,15 @@ Kurulum dosyaları GitHub'daki **Releases** sayfasındadır.
 ## Kullanım
 
 1. **Mikrofon** listesinden kullanılacak mikrofonu seçin.
-2. **Mod**:
+2. **Konuşulan dil** ve **Çeviri dili**'ni seçin. **⇄** düğmesi ikisinin yerini değiştirir.
+   Diller kayıt sırasında değiştirilemez; değiştirmek için önce durdurun.
+3. **Mod**:
    - **Doğru (turbo)**: daha isabetli, daha çok işlemci ister (varsayılan).
    - **Hızlı (small)**: zayıf bilgisayarlar için; hatalar daha fazladır.
-3. **▶ Başlat**. Konuşma cümle cümle, birkaç saniye gecikmeyle Türkçe olarak görünür.
-4. **■ Durdur** dediğinizde sırada kalan konuşma da işlenir.
-5. **TXT kaydet** / **DOCX kaydet** ile metni kaydedin.
-   "Romence aslını da göster/kaydet" işaretliyse orijinal Romence metin de eklenir.
+4. **▶ Başlat**. Konuşma cümle cümle, birkaç saniye gecikmeyle çeviri olarak görünür.
+5. **■ Durdur** dediğinizde sırada kalan konuşma da işlenir.
+6. **TXT kaydet** / **DOCX kaydet** ile metni kaydedin.
+   "Konuşulan metni de göster/kaydet" işaretliyse orijinal metin de eklenir.
 
 Sağ alttaki **"Sırada bekleyen"** sayısı sürekli artıyorsa bilgisayar konuşmaya yetişemiyordur;
 **Hızlı (small)** moduna geçin.
@@ -55,7 +60,10 @@ Sağ alttaki **"Sırada bekleyen"** sayısı sürekli artıyorsa bilgisayar konu
 ## Bilinen sınırlar
 
 - Çeviri makine çevirisidir; özel isimler, rakamlar ve uzun cümlelerde hata yapabilir.
-  Önemli metinleri Romence aslıyla karşılaştırın.
+  Önemli metinleri aslıyla karşılaştırın.
+- Konuşulan dil otomatik algılanmaz; seçilen dil dışında konuşulursa sonuç bozuk olur.
+- Romence tanıma, İngilizce ve Türkçe'ye göre daha zayıftır (Whisper'ın eğitim verisinde
+  Romence çok az).
 - Gürültülü ortam, uzak mikrofon ve aynı anda konuşan kişiler tanıma kalitesini düşürür.
 - Bu bir "simültane çeviri" değildir: konuşmacı durakladıkça parça parça çevirir.
 
@@ -68,7 +76,7 @@ Kurulum dosyaları GitHub Actions ile otomatik üretilir; kendi bilgisayarınız
 1. Bu klasörün içeriğini yeni bir GitHub deposuna yükleyin (`models/` klasörü gerekmez).
 2. Depoda **Actions** sekmesi → **"Kurulum dosyalarını oluştur"** → **Run workflow**.
 3. İlk çalıştırmada modeller indirilip dönüştürülür. Sonraki çalıştırmalarda önbellekten gelir.
-4. Her sistemde paketlenmiş uygulama, gerçek bir Romence ses kaydını **offline** tanıyıp
+4. Her sistemde paketlenmiş uygulama, gerçek Romence, İngilizce ve Türkçe ses kayıtlarını **offline** tanıyıp
    çeviren bir kendi kendine testten geçer. Test başarısız olursa dosya yayınlanmaz.
 5. Bittiğinde **Releases** sayfasında `.exe` ve `.dmg` dosyaları belirir.
 
@@ -82,7 +90,7 @@ python scripts/prepare_models.py          # models/ klasörünü oluşturur (int
 python app/main.py
 ```
 
-Test (mikrofonsuz): `python tests/test_engine.py <romence_wav_klasoru> large-v3-turbo`
+Test (mikrofonsuz): `python tests/test_engine.py <wav_klasoru> large-v3-turbo <kaynak> <hedef>` (ör. `en tr`)
 
 ## Proje yapısı
 
@@ -101,4 +109,4 @@ installer/windows.iss        Windows kurulum sihirbazı (Inno Setup)
 - **NLLB-200** (çeviri modeli): CC-BY-NC 4.0, **yalnızca ticari olmayan kullanım.**
   Ticari kullanım gerekirse çeviri modeli değiştirilmelidir.
 - **Whisper** (konuşma tanıma modeli): MIT.
-- CI testindeki örnek ses: Google FLEURS veri seti (CC-BY 4.0); uygulama paketine dahil edilmez.
+- CI testindeki örnek sesler (Romence, İngilizce, Türkçe): Google FLEURS veri seti (CC-BY 4.0); uygulama paketine dahil edilmez.

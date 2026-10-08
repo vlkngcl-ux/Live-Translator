@@ -1,4 +1,7 @@
-"""Canlı Çevirmen — Romence konuşmayı dinler, Türkçe metin olarak gösterir. Offline."""
+"""Canlı Çevirmen — konuşmayı dinler, seçilen dile çevirip metin olarak gösterir. Offline.
+
+Diller: Romence, İngilizce, Türkçe (her yönde).
+"""
 import os
 import queue
 import sys
@@ -17,9 +20,11 @@ if sys.stdout is None or sys.stderr is None:
     sys.stderr = sys.stderr or _null
 
 import export  # noqa: E402
-from engine import Engine, available_whisper_models  # noqa: E402
+from engine import LANGUAGES, Engine, available_whisper_models, lang_name  # noqa: E402
 
-APP_NAME = "Canlı Çevirmen (RO → TR)"
+APP_NAME = "Canlı Çevirmen"
+LANG_CODES = list(LANGUAGES)                     # ["ro", "en", "tr"]
+LANG_NAMES = [lang_name(c) for c in LANG_CODES]  # ["Romence", "İngilizce", "Türkçe"]
 
 
 class App:
@@ -33,8 +38,8 @@ class App:
         self.devices = []
 
         root.title(APP_NAME)
-        root.geometry("900x620")
-        root.minsize(640, 420)
+        root.geometry("920x640")
+        root.minsize(680, 440)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.models = available_whisper_models()
@@ -70,10 +75,29 @@ class App:
         self.level.pack(side="left", padx=10)
         self.level_bar = self.level.create_rectangle(0, 0, 0, 14, fill="#3a9d5d", width=0)
 
+        # Dil seçimi
+        langs = ttk.Frame(self.root)
+        langs.pack(fill="x", **pad)
+        ttk.Label(langs, text="Konuşulan dil:").pack(side="left")
+        self.src_var = tk.StringVar(value=lang_name("ro"))
+        self.src_cb = ttk.Combobox(langs, textvariable=self.src_var, state="readonly",
+                                   width=12, values=LANG_NAMES)
+        self.src_cb.pack(side="left", padx=(2, 6))
+        self.swap_btn = ttk.Button(langs, text="⇄", width=3, command=self._swap)
+        self.swap_btn.pack(side="left")
+        ttk.Label(langs, text="Çeviri dili:").pack(side="left", padx=(6, 0))
+        self.tgt_var = tk.StringVar(value=lang_name("tr"))
+        self.tgt_cb = ttk.Combobox(langs, textvariable=self.tgt_var, state="readonly",
+                                   width=12, values=LANG_NAMES)
+        self.tgt_cb.pack(side="left", padx=(2, 6))
+        self._prev = {"src": self.src_var.get(), "tgt": self.tgt_var.get()}
+        self.src_cb.bind("<<ComboboxSelected>>", lambda e: self._lang_changed("src"))
+        self.tgt_cb.bind("<<ComboboxSelected>>", lambda e: self._lang_changed("tgt"))
+
         # Alt çubuklar metin alanından ÖNCE yerleştirilir; böylece pencere küçülse de görünür kalırlar.
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", side="bottom")
-        self.status = tk.StringVar(value="Hazır. Başlat'a basın.")
+        self.status = tk.StringVar(value="Hazır. Dilleri seçip Başlat'a basın.")
         ttk.Label(bar, textvariable=self.status, anchor="w").pack(
             side="left", fill="x", expand=True, padx=8, pady=3)
         self.backlog = tk.StringVar(value="")
@@ -81,9 +105,9 @@ class App:
 
         opts = ttk.Frame(self.root)
         opts.pack(fill="x", side="bottom", **pad)
-        self.show_ro = tk.BooleanVar(value=False)
+        self.show_src = tk.BooleanVar(value=False)
         self.show_time = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Romence aslını da göster/kaydet", variable=self.show_ro,
+        ttk.Checkbutton(opts, text="Konuşulan metni de göster/kaydet", variable=self.show_src,
                         command=self._redraw).pack(side="left")
         ttk.Checkbutton(opts, text="Zaman damgası", variable=self.show_time,
                         command=self._redraw).pack(side="left", padx=10)
@@ -107,8 +131,28 @@ class App:
     def _apply_tag_fonts(self):
         self.text.tag_configure("time", foreground="#888888",
                                 font=("TkDefaultFont", max(9, self.font_size - 5)))
-        self.text.tag_configure("ro", foreground="#7a7a7a",
+        self.text.tag_configure("src", foreground="#7a7a7a",
                                 font=("TkDefaultFont", max(10, self.font_size - 3), "italic"))
+
+    # ---------------- dil seçimi ----------------
+    def _code(self, name: str) -> str:
+        return LANG_CODES[LANG_NAMES.index(name)]
+
+    def _lang_changed(self, which: str):
+        """İki tarafta aynı dil seçilirse diğer tarafı önceki seçimle değiştir (yer değiştirme)."""
+        src, tgt = self.src_var.get(), self.tgt_var.get()
+        if src == tgt:
+            if which == "src":
+                self.tgt_var.set(self._prev["src"])
+            else:
+                self.src_var.set(self._prev["tgt"])
+        self._prev = {"src": self.src_var.get(), "tgt": self.tgt_var.get()}
+
+    def _swap(self):
+        s, t = self.src_var.get(), self.tgt_var.get()
+        self.src_var.set(t)
+        self.tgt_var.set(s)
+        self._prev = {"src": t, "tgt": s}
 
     def _load_devices(self):
         try:
@@ -126,6 +170,9 @@ class App:
             self.status.set("Mikrofon bulunamadı.")
 
     # ---------------- başlat / durdur ----------------
+    def _controls(self):
+        return (self.model_cb, self.device_cb, self.src_cb, self.tgt_cb)
+
     def toggle(self):
         if self.busy:
             return
@@ -143,10 +190,17 @@ class App:
         if not self.devices:
             messagebox.showerror(APP_NAME, "Kullanılabilir mikrofon yok.")
             return
+        try:
+            self.engine.set_languages(self._code(self.src_var.get()), self._code(self.tgt_var.get()))
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e))
+            return
         model_path = dict(self.models)[self.model_var.get()]
         device = self.devices[self.device_cb.current()][0]
         self.busy = True
-        for w in (self.start_btn, self.model_cb, self.device_cb):
+        self.start_btn.state(["disabled"])
+        self.swap_btn.state(["disabled"])
+        for w in self._controls():
             w.state(["disabled"])
 
         def work():
@@ -164,7 +218,8 @@ class App:
         self.busy = False
         self.start_btn.configure(text="▶ Başlat")
         self.start_btn.state(["!disabled"])
-        for w in (self.model_cb, self.device_cb):
+        self.swap_btn.state(["!disabled"])
+        for w in self._controls():
             w.state(["!disabled", "readonly"])
         self.backlog.set("")
         self._draw_level(0)
@@ -175,6 +230,9 @@ class App:
             while True:
                 kind, val = self.engine.events.get_nowait()
                 if kind == "status":
+                    if val == "Dinleniyor…":
+                        val = (f"Dinleniyor… ({lang_name(self.engine.src)} → "
+                               f"{lang_name(self.engine.tgt)})")
                     self.status.set(val)
                 elif kind == "result":
                     self.results.append(val)
@@ -212,9 +270,9 @@ class App:
         self.text.configure(state="normal")
         if self.show_time.get():
             self.text.insert("end", f"[{export._ts(r.t_start)}]\n", "time")
-        self.text.insert("end", r.turkish + "\n")
-        if self.show_ro.get():
-            self.text.insert("end", r.romanian + "\n", "ro")
+        self.text.insert("end", r.target + "\n")
+        if self.show_src.get():
+            self.text.insert("end", r.source + "\n", "src")
         self.text.insert("end", "\n")
         self.text.configure(state="disabled")
         self.text.see("end")
@@ -249,7 +307,7 @@ class App:
             return
         fn = export.save_docx if kind == "docx" else export.save_txt
         try:
-            fn(path, list(self.results), include_romanian=self.show_ro.get(),
+            fn(path, list(self.results), include_source=self.show_src.get(),
                include_time=self.show_time.get())
             self.status.set(f"Kaydedildi: {path}")
         except Exception as e:
@@ -265,11 +323,16 @@ class App:
             self.root.destroy()
 
 
-def selftest(out_path: str, npy_path: str = None) -> int:
+# Selftest'te her konuşma dili için denenecek çeviri yönleri
+SELFTEST_PAIRS = {"ro": ["tr", "en"], "en": ["ro", "tr"], "tr": ["en"]}
+
+
+def selftest(out_path: str, sample: str = None) -> int:
     """Paketlenmiş uygulamanın her işletim sisteminde çalıştığını doğrulamak için (CI kullanır).
 
-    Tüm modelleri yükler, örnek Romence sesi (16 kHz float32 .npy) tanır ve çevirir;
-    sonucu JSON olarak yazar. Pencere açmaz.
+    `sample`: 16 kHz float32 .npy dosyası (Romence kabul edilir) veya içinde
+    selftest_<dil>.npy dosyaları olan bir klasör. Her örnek, ilgili dilde tanınır ve
+    SELFTEST_PAIRS'teki her hedefe çevrilir. Sonuç JSON olarak yazılır; pencere açmaz.
     """
     import json
     import time
@@ -281,17 +344,36 @@ def selftest(out_path: str, npy_path: str = None) -> int:
 
     report = {"ok": False, "models": {}}
     try:
+        samples = {}
+        if sample and os.path.isdir(sample):
+            for code in LANG_CODES:
+                p = os.path.join(sample, f"selftest_{code}.npy")
+                if os.path.exists(p):
+                    samples[code] = np.load(p).astype(np.float32)
+        elif sample:
+            samples["ro"] = np.load(sample).astype(np.float32)
+        else:
+            samples["ro"] = np.zeros(16000 * 3, np.float32)
+
         threads = os.cpu_count() or 2
         tr = Translator(models_dir() / "nllb", threads)
-        report["translate_text"] = tr.translate("Bună ziua, ce mai faceți? Astăzi vremea este frumoasă.")
-        audio = np.load(npy_path).astype(np.float32) if npy_path else np.zeros(16000 * 3, np.float32)
+        report["translate_text"] = tr.translate(
+            "Bună ziua, ce mai faceți? Astăzi vremea este frumoasă.", "ro", "tr")
+        all_ok = bool(report["translate_text"])
         for label, path in available_whisper_models():
-            t = time.time()
-            ro = Recognizer(path, threads).transcribe(audio)
-            report["models"][label] = {"romanian": ro, "turkish": tr.translate(ro),
-                                       "seconds": round(time.time() - t, 1)}
+            rec = Recognizer(path, threads)
+            rows = []
+            for src, audio in samples.items():
+                t = time.time()
+                text = rec.transcribe(audio, language=src)
+                for tgt in SELFTEST_PAIRS[src]:
+                    out = tr.translate(text, src, tgt)
+                    rows.append({"pair": f"{src}→{tgt}", "source": text, "target": out,
+                                 "seconds": round(time.time() - t, 1)})
+                    all_ok = all_ok and bool(text) and bool(out)
+            report["models"][label] = rows
         report["sounddevice"] = _check_sounddevice()
-        report["ok"] = bool(report["translate_text"]) and bool(report["models"])
+        report["ok"] = all_ok and bool(report["models"])
     except Exception:
         report["error"] = traceback.format_exc()
     with open(out_path, "w", encoding="utf-8") as f:

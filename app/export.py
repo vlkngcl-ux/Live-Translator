@@ -3,36 +3,45 @@ import datetime as _dt
 import zipfile
 from xml.sax.saxutils import escape
 
+from engine import lang_name, lang_short
+
 
 def _ts(sec: float) -> str:
     sec = int(sec)
     return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
-def build_lines(results, include_romanian: bool, include_time: bool):
-    """[(zaman satırı veya None, türkçe, romence veya None)]"""
+def build_lines(results, include_source: bool, include_time: bool):
+    """[(zaman satırı veya None, çeviri, '(XX) kaynak metin' veya None)]"""
     rows = []
     for r in results:
         head = f"[{_ts(r.t_start)} - {_ts(r.t_end)}]" if include_time else None
-        rows.append((head, r.turkish, r.romanian if include_romanian else None))
+        src = f"({lang_short(r.src)}) {r.source}" if include_source else None
+        rows.append((head, r.target, src))
     return rows
 
 
-def default_title():
-    return "Romence → Türkçe çeviri — " + _dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+def default_title(results=()):
+    pairs = {(r.src, r.tgt) for r in results}
+    if len(pairs) == 1:
+        s, t = next(iter(pairs))
+        head = f"{lang_name(s)} → {lang_name(t)} çeviri"
+    else:
+        head = "Çeviri"
+    return head + " — " + _dt.datetime.now().strftime("%d.%m.%Y %H:%M")
 
 
-def save_txt(path, results, include_romanian=False, include_time=True, title=None):
-    title = title or default_title()
+def save_txt(path, results, include_source=False, include_time=True, title=None):
+    title = title or default_title(results)
     lines = [title, ""]
-    for head, tr, ro in build_lines(results, include_romanian, include_time):
+    for head, target, source in build_lines(results, include_source, include_time):
         if head:
             lines.append(head)
-        lines.append(tr)
-        if ro:
-            lines.append(f"(RO) {ro}")
+        lines.append(target)
+        if source:
+            lines.append(source)
         lines.append("")
-    # BOM: Windows Not Defteri'nde Türkçe karakterlerin doğru görünmesi için
+    # BOM: Windows Not Defteri'nde Türkçe/Romence karakterlerin doğru görünmesi için
     with open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write("\n".join(lines))
 
@@ -66,15 +75,15 @@ def _p(text, bold=False, italic=False, size=None, color=None, space_after=None):
     return f"<w:p>{ppr}{run}</w:p>"
 
 
-def save_docx(path, results, include_romanian=False, include_time=True, title=None):
-    title = title or default_title()
+def save_docx(path, results, include_source=False, include_time=True, title=None):
+    title = title or default_title(results)
     body = [_p(title, bold=True, size=32, space_after=240)]
-    for head, tr, ro in build_lines(results, include_romanian, include_time):
+    for head, target, source in build_lines(results, include_source, include_time):
         if head:
             body.append(_p(head, size=18, color="808080", space_after=0))
-        body.append(_p(tr, size=24, space_after=60 if ro else 200))
-        if ro:
-            body.append(_p(ro, italic=True, size=20, color="666666", space_after=200))
+        body.append(_p(target, size=24, space_after=60 if source else 200))
+        if source:
+            body.append(_p(source, italic=True, size=20, color="666666", space_after=200))
     doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
            "<w:body>" + "".join(body) +

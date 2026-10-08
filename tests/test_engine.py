@@ -1,6 +1,6 @@
-"""Uçtan uca test: Romence kayıtları tek bir 'ortam kaydı' gibi birleştirip motora akıtır.
+"""Uçtan uca test: Konuşma kayıtlarını tek bir 'ortam kaydı' gibi birleştirip motora akıtır.
 
-Kullanım: python tests/test_engine.py <wav_klasörü> [model_anahtarı]
+Kullanım: python tests/test_engine.py <wav_klasörü> [model_anahtarı] [kaynak_dil] [hedef_dil] [gürültü_std]
 Mikrofon gerektirmez. Ağ olmadan çalışmalıdır (ör. `unshare -rn` altında).
 """
 import sys
@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from engine import SAMPLE_RATE, Engine, models_dir  # noqa: E402
 
 
-def build_ambient(wav_dir: Path):
+def build_ambient(wav_dir: Path, noise_std: float = 0.0003):
     rng = np.random.default_rng(0)
     parts, bounds, t = [], [], 0.0
     for f in sorted(wav_dir.glob("*.wav")):
@@ -28,19 +28,23 @@ def build_ambient(wav_dir: Path):
         t += len(x) / sr
     parts.append(np.zeros(int(1.5 * SAMPLE_RATE), np.float32))
     audio = np.concatenate(parts)
-    audio += rng.normal(0, 0.002, len(audio)).astype(np.float32)  # oda gürültüsü
+    audio += rng.normal(0, noise_std, len(audio)).astype(np.float32)  # oda gürültüsü
     return audio, bounds
 
 
 def main():
     wav_dir = Path(sys.argv[1])
     key = sys.argv[2] if len(sys.argv) > 2 else "large-v3-turbo"
-    audio, bounds = build_ambient(wav_dir)
+    src = sys.argv[3] if len(sys.argv) > 3 else "ro"
+    tgt = sys.argv[4] if len(sys.argv) > 4 else "tr"
+    noise = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0003
+    audio, bounds = build_ambient(wav_dir, noise)
     print(f"Toplam kayıt: {len(audio) / SAMPLE_RATE:.1f} sn, {len(bounds)} konuşma")
     for b in bounds:
         print("  gerçek konuşma:", b)
 
     eng = Engine()
+    eng.set_languages(src, tgt)
     t0 = time.time()
     eng.load(models_dir() / f"whisper-{key}")
     print(f"Model yükleme: {time.time() - t0:.1f} sn")
@@ -51,7 +55,8 @@ def main():
         kind, val = eng.events.get()
         if kind == "result":
             n += 1
-            print(f"\n[{val.t_start:.1f}-{val.t_end:.1f}s]\n  RO: {val.romanian}\n  TR: {val.turkish}")
+            print(f"\n[{val.t_start:.1f}-{val.t_end:.1f}s]\n  {val.src.upper()}: {val.source}"
+                  f"\n  {val.tgt.upper()}: {val.target}")
         elif kind == "error":
             print("HATA:", val)
         elif kind == "done":
