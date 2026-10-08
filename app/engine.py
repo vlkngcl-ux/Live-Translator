@@ -46,6 +46,7 @@ INTERIM_MIN_SEC = 1.5       # devam eden cümle en az bu uzunluktaysa ön çevir
 INTERIM_EVERY_SEC = 1.5     # ön çeviri en fazla bu sıklıkta güncellenir
 INTERIM_GAP_SEC = 1.0       # bir ön çeviri bittikten sonra bir sonrakine kadar en az bu kadar bekle
 INTERIM_STOP_ON_SILENCE_SEC = 0.2   # bu kadar sessizlik başladıysa yeni ön çeviri başlatma
+INTERIM_NEAR_MAX_SEC = 3.0  # parça MAX_CHUNK_SEC'e bu kadar yaklaştıysa yeni ön çeviri başlatma
 MIN_SPEECH_SEC = 0.3        # toplam konuşma bundan azsa parça atılır (gürültüyü Whisper VAD ayrıca eler)
 PREROLL_SEC = 0.3           # konuşma başlamadan önceki bu kadar ses de parçaya eklenir
 NOISE_WINDOW_SEC = 15.0     # gürültü tabanı bu pencerenin alt NOISE_PERCENTILE'ından hesaplanır
@@ -637,7 +638,10 @@ class Engine:
                 # Konuşmacı durmaya başladıysa yeni ön çeviri başlatma: cümle birazdan kapanacak ve
                 # sürmekte olan bir ön çeviri kesin çeviriyi bekletirdi (Mac ölçümü: 4.7 sn bekleme).
                 speaking = seg.silence_run * FRAME_SEC < INTERIM_STOP_ON_SILENCE_SEC
-                if (cur and speaking and cur[2] >= INTERIM_MIN_SEC
+                # Parça en uzun süreye yaklaştıysa zorla kapanacak; yeni ön çeviri onu bekletir
+                # (Mac ölçümü: 15 sn'lik kesintisiz konuşmada 7.2 sn bekleme).
+                near_max = cur is not None and cur[2] > MAX_CHUNK_SEC - INTERIM_NEAR_MAX_SEC
+                if (cur and speaking and not near_max and cur[2] >= INTERIM_MIN_SEC
                         and seg.t - last_interim_t >= INTERIM_EVERY_SEC):
                     with self._interim_lock:
                         self._interim_slot = cur
@@ -755,6 +759,10 @@ class Engine:
                 {"ses_sn": round(dur, 1), "sure": round(time.monotonic() - _t0, 2)})
             text = clean_hallucinations(text, src, 2.0, logprob)
             if not text or cid <= self._last_final_id:   # bu arada kesin çevirisi geldiyse gösterme
+                return
+            if not self._parallel_now and not self._chunk_q.empty():
+                # Sırada kesin çeviri bekliyor: ön çevirinin çeviri adımını atla, onu bekletme.
+                self.stats["interim_skipped"] = self.stats.get("interim_skipped", 0) + 1
                 return
             out = self.translator.translate(text, src, tgt, beam_size=1)
             if cid <= self._last_final_id:
