@@ -131,8 +131,14 @@ def wcpp(fname, audio_ctx=0):
 def mlx(repo):
     def load():
         import mlx.core as mx
+        from huggingface_hub import snapshot_download
         print("  mlx cihazı:", mx.default_device(), "| metal:", mx.metal.is_available(), flush=True)
-        return repo
+        d = Path("mlx-models") / repo.split("/")[-1]
+        snapshot_download(repo, local_dir=str(d), allow_patterns=["config.json", "*.safetensors", "*.npz"])
+        if (d / "model.safetensors").exists() and not (d / "weights.safetensors").exists():
+            (d / "model.safetensors").rename(d / "weights.safetensors")   # mlx-whisper bu adı bekler
+        print("  dosyalar:", sorted((f.name, round(f.stat().st_size / 1e6)) for f in d.iterdir()), flush=True)
+        return str(d)
 
     def tr(repo_, x):
         import mlx_whisper
@@ -149,12 +155,15 @@ def main():
     clips = load_clips()
     print(f"{len(clips)} Türkçe kayıt, toplam {sum(len(x) for x, _ in clips) / 16000:.0f} sn", flush=True)
 
-    run("faster-whisper turbo int8 (CPU, mevcut)", *fw("large-v3-turbo"), clips)
-    run("faster-whisper small int8 (CPU, mevcut)", *fw("small"), clips)
-    run("whisper.cpp turbo q5_0", *wcpp("ggml-large-v3-turbo-q5_0.bin"), clips)
-    run("whisper.cpp turbo q5_0 + audio_ctx", *wcpp("ggml-large-v3-turbo-q5_0.bin", audio_ctx=1), clips)
-    run("whisper.cpp turbo q8_0", *wcpp("ggml-large-v3-turbo-q8_0.bin"), clips)
-    run("mlx turbo", *mlx("mlx-community/whisper-large-v3-turbo"), clips)
+    which = os.environ.get("BENCH", "all")
+    if which == "all":
+        run("faster-whisper turbo int8 (CPU, mevcut)", *fw("large-v3-turbo"), clips)
+        run("faster-whisper small int8 (CPU, mevcut)", *fw("small"), clips)
+        run("whisper.cpp turbo q5_0", *wcpp("ggml-large-v3-turbo-q5_0.bin"), clips)
+        run("whisper.cpp turbo q8_0", *wcpp("ggml-large-v3-turbo-q8_0.bin"), clips)
+    run("mlx turbo fp16 (1.6 GB)", *mlx("mlx-community/whisper-large-v3-turbo"), clips)
+    run("mlx turbo 8bit (0.86 GB)", *mlx("mlx-community/whisper-large-v3-turbo-8bit"), clips)
+    run("mlx turbo 4bit (0.46 GB)", *mlx("mlx-community/whisper-large-v3-turbo-4bit"), clips)
 
     print("\n================ ÖZET ================")
     for r in RESULTS:
