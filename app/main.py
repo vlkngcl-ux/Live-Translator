@@ -110,9 +110,12 @@ class App:
         opts.pack(fill="x", side="bottom", **pad)
         self.show_src = tk.BooleanVar(value=False)
         self.show_time = tk.BooleanVar(value=True)
+        self.show_interim = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="Konuşulan metni de göster/kaydet", variable=self.show_src,
                         command=self._redraw).pack(side="left")
-        ttk.Checkbutton(opts, text="Zaman damgası", variable=self.show_time,
+        ttk.Checkbutton(opts, text="Saat", variable=self.show_time,
+                        command=self._redraw).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(opts, text="Ön çeviri", variable=self.show_interim,
                         command=self._redraw).pack(side="left", padx=10)
         ttk.Button(opts, text="A−", width=3, command=lambda: self._font(-1)).pack(side="left")
         ttk.Button(opts, text="A+", width=3, command=lambda: self._font(+1)).pack(side="left", padx=(2, 0))
@@ -129,6 +132,11 @@ class App:
         self.text.configure(yscrollcommand=sb.set, state="disabled")
         self.text.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        # Ön çeviri bölgesi her zaman metnin sonunda, "istart" işaretinden sonra durur.
+        # Kesin sonuçlar bu işaretin ÖNÜNE eklenir; böylece ön çeviri hep en altta kalır.
+        self.text.mark_set("istart", "end-1c")
+        self.text.mark_gravity("istart", "right")
+        self.interim = None          # gösterilen ön çeviri (Result) veya None
         self._apply_tag_fonts()
 
     def _apply_tag_fonts(self):
@@ -136,6 +144,8 @@ class App:
                                 font=("TkDefaultFont", max(9, self.font_size - 5)))
         self.text.tag_configure("src", foreground="#7a7a7a",
                                 font=("TkDefaultFont", max(10, self.font_size - 3), "italic"))
+        self.text.tag_configure("interim", foreground="#8a8a8a",
+                                font=("TkDefaultFont", self.font_size, "italic"))
 
     # ---------------- dil seçimi ----------------
     def _code(self, name: str) -> str:
@@ -208,7 +218,7 @@ class App:
 
         def work():
             try:
-                self.engine.load(model_path)
+                self.engine.load(model_path, interim=self.show_interim.get())
                 self.engine.start(device)
                 self.engine.events.put(("started", None))
             except Exception as e:
@@ -226,6 +236,9 @@ class App:
             w.state(["!disabled", "readonly"])
         self.backlog.set("")
         self._draw_level(0)
+        if self.interim is not None:     # oturum bitti; asılı kalan ön çeviri olmasın
+            self.interim = None
+            self._render_interim()
         st = self.engine.stats
         if st.get("vad_skipped") or st.get("halluc_dropped"):
             self.status.set(f"Durduruldu. (Konuşma içermeyen {st['vad_skipped']} ses parçası ve "
@@ -243,9 +256,19 @@ class App:
                     self.status.set(val)
                 elif kind == "result":
                     self.results.append(val)
+                    if self.interim is not None and self.interim.rid <= val.rid:
+                        self.interim = None              # ön çeviri yerini kesin çeviriye bırakır
                     self._append(val)
+                    self._render_interim()
                     if val.latency:
                         self.latency_var.set(f"Gecikme: {val.latency:.1f} sn".replace(".", ","))
+                elif kind == "interim":
+                    self.interim = val
+                    self._render_interim()
+                elif kind == "discard":
+                    if self.interim is not None and self.interim.rid <= val:
+                        self.interim = None
+                        self._render_interim()
                 elif kind == "error":
                     self.status.set(val)
                 elif kind == "level":
@@ -276,22 +299,40 @@ class App:
 
     # ---------------- metin alanı ----------------
     def _append(self, r):
+        """Kesin sonucu ön çeviri bölgesinin ('istart') ÖNÜNE ekler."""
         self.text.configure(state="normal")
         if self.show_time.get():
-            self.text.insert("end", f"[{export._ts(r.t_start)}]\n", "time")
-        self.text.insert("end", r.target + "\n")
+            self.text.insert("istart", f"[{export.clock(r)}]\n", "time")
+        self.text.insert("istart", r.target + "\n")
         if self.show_src.get():
-            self.text.insert("end", r.source + "\n", "src")
-        self.text.insert("end", "\n")
+            self.text.insert("istart", r.source + "\n", "src")
+        self.text.insert("istart", "\n")
+        self.text.configure(state="disabled")
+        self.text.see("end")
+
+    def _render_interim(self):
+        """En alttaki ön çeviri bölgesini yeniden çizer (yoksa boşaltır)."""
+        self.text.configure(state="normal")
+        self.text.delete("istart", "end-1c")
+        r = self.interim if self.show_interim.get() else None
+        if r is not None:
+            pos = self.text.index("istart")
+            label = f"[{export.clock(r)}] " if self.show_time.get() else ""
+            self.text.insert("istart", f"{label}… {r.target}\n", "interim")
+            if self.show_src.get():
+                self.text.insert("istart", r.source + "\n", "src")
+            self.text.mark_set("istart", pos)           # işaret ön çevirinin BAŞINDA kalsın
         self.text.configure(state="disabled")
         self.text.see("end")
 
     def _redraw(self):
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
+        self.text.mark_set("istart", "end-1c")
         self.text.configure(state="disabled")
         for r in self.results:
             self._append(r)
+        self._render_interim()
 
     def _font(self, d):
         self.font_size = max(10, min(32, self.font_size + d))
@@ -302,6 +343,7 @@ class App:
         if self.results and not messagebox.askyesno(APP_NAME, "Tüm metin silinsin mi?"):
             return
         self.results.clear()
+        self.interim = None
         self._redraw()
 
     def save(self, kind):

@@ -26,10 +26,24 @@ SAMPLE_RATE = 16000
 
 # Konuşma bölme ayarları
 FRAME_SEC = 0.03            # enerji ölçüm penceresi
-MIN_CHUNK_SEC = 2.0         # bu süreden kısa parçalar, sessizlik olsa bile bekletilir (v1.1.0: 4.0)
-MAX_CHUNK_SEC = 15.0        # bu süreye ulaşan parça zorla gönderilir (v1.1.0: 20.0; Whisper sınırı 30 sn)
-SILENCE_END_SEC = 0.6       # konuşmadan sonra bu kadar sessizlik -> parçayı kapat (v1.1.0: 0.7)
+# v1.2.0 değerleri ölçümle seçildi (cümle içinde doğal duraksamalı Türkçe kayıtta kelime hata oranı):
+#   0.6 sn / 2 sn (v1.1.1): %20.2 (30 parça)  ->  0.8 sn / 3 sn: %12.9 (17 parça)
+# Kısa sessizlik eşiği cümleleri ortasından bölüyordu; parçalar bağlamsız kalınca hem tanıma hem
+# çeviri bozuluyordu. Bekleme süresinin yarattığı gecikmeyi ön çeviri (interim) telafi eder.
+MIN_CHUNK_SEC = 3.0         # bu süreden kısa parçalar, sessizlik olsa bile bekletilir
+MAX_CHUNK_SEC = 15.0        # bu süreye ulaşan parça zorla gönderilir (Whisper sınırı 30 sn)
+SILENCE_END_SEC = 0.8       # konuşmadan sonra bu kadar sessizlik -> parçayı kapat
+# Dile göre arama genişliği: Romencede (Whisper'ın az veriyle eğitildiği dil) beam 3 hata oranını
+# %26.3 -> %22.7 indirdi; Türkçede iyileştirmedi (%12.9 -> %15.7). Süreye etkisi ölçülemeyecek kadar az.
+BEAM_BY_LANG = {"ro": 3}
 MIN_VAD_SPEECH_SEC = 0.5    # Silero VAD'in parçada bulduğu konuşma bundan azsa Whisper'a hiç gönderilmez
+# Whisper segment süzgeci: herhangi biri aşılırsa segment atılır
+SEG_MAX_NO_SPEECH = 0.6     # "bu segmentte konuşma yok" olasılığı
+SEG_MIN_LOGPROB = -1.0      # ortalama güven (log olasılık)
+SEG_MAX_COMPRESSION = 2.4   # metin tekrarı göstergesi (gzip sıkıştırma oranı)
+PARALLEL_INTERIM_MIN_CPUS = 6   # bu kadar çekirdek varsa ön çeviri ayrı iş parçacığında çalışır
+INTERIM_MIN_SEC = 1.5       # devam eden cümle en az bu uzunluktaysa ön çeviri yapılır
+INTERIM_EVERY_SEC = 1.5     # ön çeviri en fazla bu sıklıkta güncellenir
 MIN_SPEECH_SEC = 0.3        # toplam konuşma bundan azsa parça atılır (gürültüyü Whisper VAD ayrıca eler)
 PREROLL_SEC = 0.3           # konuşma başlamadan önceki bu kadar ses de parçaya eklenir
 NOISE_WINDOW_SEC = 15.0     # gürültü tabanı bu pencerenin alt NOISE_PERCENTILE'ından hesaplanır
@@ -88,6 +102,9 @@ class Result:
     src: str = "ro"     # dil kodları
     tgt: str = "tr"
     latency: float = 0.0  # parça kapandıktan çeviri hazır olana kadar geçen süre (sn)
+    wall: float = 0.0     # konuşmanın başladığı sistem saati (time.time(), epoch sn)
+    rid: int = 0          # parça kimliği (ön çeviri ile kesin çeviriyi eşleştirmek için)
+    interim: bool = False # True: hızlı ön çeviri (sonradan kesin çeviriyle değiştirilir)
 
 
 # --------------------------------------------------------------------------------------
@@ -173,14 +190,14 @@ class Translator:
         self.sp = spm.SentencePieceProcessor(
             model_file=str(model_path / "sentencepiece.bpe.model"))
 
-    def translate(self, text: str, src: str = "ro", tgt: str = "tr") -> str:
+    def translate(self, text: str, src: str = "ro", tgt: str = "tr", beam_size: int = 2) -> str:
         text = text.strip()
         if not text or src == tgt:
             return text
         s, t = LANGUAGES[src][2], LANGUAGES[tgt][2]
         tokens = [s] + self.sp.encode(text, out_type=str) + ["</s>"]
         res = self.model.translate_batch(
-            [tokens], target_prefix=[[t]], beam_size=2,
+            [tokens], target_prefix=[[t]], beam_size=beam_size,
             max_decoding_length=400, repetition_penalty=1.1,
         )
         out = [tok for tok in res[0].hypotheses[0] if tok not in (t, "</s>")]
@@ -210,13 +227,19 @@ class Recognizer:
     def transcribe(self, audio: np.ndarray, language: str = "ro") -> str:
         return self.transcribe_ex(audio, language)[0]
 
-    def transcribe_ex(self, audio: np.ndarray, language: str = "ro"):
-        """(metin, ortalama avg_logprob) döndürür. Güveni düşük / tekrarlı segmentler atılır."""
+    def transcribe_ex(self, audio: np.ndarray, language: str = "ro", prompt: str = None,
+                      beam_size: int = 1):
+        """(metin, ortalama avg_logprob) döndürür. Güveni düşük / tekrarlı segmentler atılır.
+
+        prompt: önceki cümle(ler); Whisper'a bağlam olarak verilir (cümle ortasından bölünen
+        konuşmada kelime ve yazım tutarlılığını artırır).
+        """
         segments, _info = self.model.transcribe(
             audio,
             language=language,
             task="transcribe",
-            beam_size=1,                           # anlık kullanım için hız; kalite farkı testte küçüktü
+            initial_prompt=prompt or None,
+            beam_size=beam_size,
             vad_filter=True,                       # gürültü/sessizlikte uydurmayı azaltır
             vad_parameters={"min_silence_duration_ms": 400},
             condition_on_previous_text=False,      # tekrar döngülerini engeller
@@ -227,7 +250,8 @@ class Recognizer:
         for s in segments:
             # v1.1.0'da yalnızca (no_speech > 0.8 VE logprob < -1.0) atılıyordu; sessiz odada
             # uydurmalar bu süzgeçten geçti. Artık koşullardan HERHANGİ biri yeter.
-            if s.no_speech_prob > 0.6 or s.avg_logprob < -1.0 or s.compression_ratio > 2.4:
+            if (s.no_speech_prob > SEG_MAX_NO_SPEECH or s.avg_logprob < SEG_MIN_LOGPROB
+                    or s.compression_ratio > SEG_MAX_COMPRESSION):
                 continue
             parts.append(s.text.strip())
             logprobs.append(s.avg_logprob)
@@ -235,16 +259,45 @@ class Recognizer:
         return text, (float(np.mean(logprobs)) if logprobs else -10.0)
 
 
-def _resample(x: np.ndarray, sr: int) -> np.ndarray:
-    if sr == SAMPLE_RATE:
-        return x.astype(np.float32)
-    # Basit alçak geçiren (hareketli ortalama) + doğrusal ara değer. Konuşma için yeterli.
-    k = max(1, int(round(sr / SAMPLE_RATE)))
-    if k > 1:
-        x = np.convolve(x, np.ones(k, dtype=np.float32) / k, mode="same")
-    n_out = int(len(x) * SAMPLE_RATE / sr)
-    xp = np.linspace(0, len(x) - 1, n_out)
-    return np.interp(xp, np.arange(len(x)), x).astype(np.float32)
+class StreamResampler:
+    """Mikrofon hızını (ör. 48 / 44.1 kHz) 16 kHz'e çeviren, DURUM TUTAN dönüştürücü.
+
+    v1.1.1'e kadar her küçük mikrofon bloğu ayrı ayrı dönüştürülüyordu: blok sınırlarında
+    süreksizlik oluşuyor ve her blokta kesirli örnekler atılıyordu. Bu sınıf filtre geçmişini
+    ve kesirli konumu bloklar arasında taşır; çıktı tek seferde dönüştürülmüş sesle aynıdır.
+    """
+
+    def __init__(self, sr_in: int, sr_out: int = SAMPLE_RATE, taps: int = 63):
+        self.passthrough = sr_in == sr_out
+        self.ratio = sr_in / sr_out                       # çıkış başına giriş örneği
+        fc = 0.45 * sr_out / sr_in                        # kesim (giriş örneği başına devir)
+        n = np.arange(taps) - (taps - 1) / 2
+        h = 2 * fc * np.sinc(2 * fc * n) * np.hamming(taps)
+        self.h = (h / h.sum()).astype(np.float32)         # alçak geçiren (örtüşme önleyici)
+        self.hist = np.zeros(taps - 1, np.float32)        # filtre geçmişi
+        self.prev = 0.0                                   # önceki bloğun son süzülmüş örneği
+        # sonraki çıkışın konumu (ext koordinatı). y[k] ≈ x[k - (taps-1)/2] olduğundan filtre
+        # gecikmesi kadar ileriden başla: çıkış girişle aynı zaman çizgisinde kalır.
+        self.pos = 1.0 + (taps - 1) / 2
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, np.float32)
+        if self.passthrough or len(x) == 0:
+            return x
+        buf = np.concatenate([self.hist, x])
+        y = np.convolve(buf, self.h, mode="valid")        # len(y) == len(x)
+        self.hist = buf[-(len(self.h) - 1):]
+        ext = np.concatenate([[self.prev], y])             # ext[0] = önceki son örnek
+        last = len(ext) - 1
+        if self.pos > last:
+            out = np.zeros(0, np.float32)
+        else:
+            pts = np.arange(self.pos, last + 1e-9, self.ratio)
+            out = np.interp(pts, np.arange(len(ext)), ext).astype(np.float32)
+            self.pos = pts[-1] + self.ratio
+        self.pos -= last                                   # yeni bloğun ext koordinatına kaydır
+        self.prev = float(y[-1])
+        return out
 
 
 class Segmenter:
@@ -263,6 +316,13 @@ class Segmenter:
         self.preroll = collections.deque(maxlen=int(PREROLL_SEC / FRAME_SEC))
         self.hist = collections.deque(maxlen=int(NOISE_WINDOW_SEC / FRAME_SEC))
         self._n = 0
+        self.chunk_id = 0                              # her yeni parça için artan kimlik
+
+    def current(self):
+        """Devam eden (henüz bitmemiş) parça: (kimlik, başlangıç sn, süre sn, ses) ya da None."""
+        if not self.chunk:
+            return None
+        return (self.chunk_id, self.chunk_start, len(self.chunk) * FRAME_SEC, np.concatenate(self.chunk))
 
     def _is_speech(self, rms: float, in_chunk: bool) -> bool:
         # Gürültü tabanı = son NOISE_WINDOW_SEC'teki çerçevelerin alt yüzdeliği. Kelime ve cümle
@@ -293,6 +353,7 @@ class Segmenter:
                     # Ön tampon: eşiği aşmadan hemen önceki sesi de ekle (ilk hece kaybolmasın).
                     self.chunk_start = max(0.0, self.t - len(self.preroll) * FRAME_SEC)
                     self.chunk = list(self.preroll) + [f]
+                    self.chunk_id += 1
                     self.preroll.clear()
                     self.speech_frames = 1
                     self.silence_run = 0
@@ -317,7 +378,7 @@ class Segmenter:
         if self.speech_frames * FRAME_SEC < MIN_SPEECH_SEC:
             return []
         audio = np.concatenate(chunk)
-        return [(self.chunk_start, self.chunk_start + len(audio) / SAMPLE_RATE, audio)]
+        return [(self.chunk_start, self.chunk_start + len(audio) / SAMPLE_RATE, audio, self.chunk_id)]
 
     def flush(self):
         return self._close() if self.chunk else []
@@ -329,6 +390,8 @@ class Engine:
     Sonuçlar ve durum mesajları `events` kuyruğuna konur; arayüz buradan okur:
       ("status", str) | ("result", Result) | ("error", str) | ("level", float)
       | ("backlog", int) | ("done", None)
+      | ("interim", Result)  -> devam eden cümlenin hızlı ön çevirisi (aynı rid'li kesin sonuçla değişir)
+      | ("discard", rid)     -> bu parçadan kesin sonuç çıkmadı; varsa ön çevirisi silinmeli
     """
 
     def __init__(self):
@@ -343,15 +406,37 @@ class Engine:
         self._loaded_whisper = None
         self.src, self.tgt = "ro", "tr"   # konuşulan dil, çeviri dili
         self.stats = {"vad_skipped": 0, "halluc_dropped": 0}   # tanılama sayaçları
+        # Önceki metni Whisper'a bağlam olarak vermek ölçümde ZARARLI çıktı (%14.0 -> %18.0;
+        # önceki cümleyi tekrar ediyordu). Varsayılan kapalı.
+        self.use_context = False
+        self.final_beam = None     # None: BEAM_BY_LANG / 1
+        self._context = ""         # son tanınan metin (bağlam için)
+        self.interim_recognizer = None   # ön çeviri için hızlı model (load() ayarlar)
         # Tanıma ve çeviri aynı işçide sırayla çalışır; ikisi de tüm çekirdekleri kullanabilir.
         self.threads = max(1, os.cpu_count() or 2)
+        # Yeterli çekirdek varsa ön çeviri AYRI bir iş parçacığında, kendi 2 çekirdeğiyle çalışır;
+        # böylece kesin çeviriyi bekletmez. Az çekirdekte (ör. 2) sırayla çalışmak daha iyidir:
+        # 2 çekirdekli test makinesinde paralel çalışma kesin çevirileri yavaşlatıyordu.
+        self.parallel_interim = self.threads >= PARALLEL_INTERIM_MIN_CPUS
+        self.interim_threads = 2 if self.parallel_interim else self.threads
+        self.final_threads = max(1, self.threads - 2) if self.parallel_interim else self.threads
 
     # ---- model yükleme ----
-    def load(self, whisper_path: Path):
+    def load(self, whisper_path: Path, interim: bool = True):
         if self._loaded_whisper != whisper_path:
             self.events.put(("status", "Konuşma tanıma modeli yükleniyor…"))
-            self.recognizer = Recognizer(whisper_path, self.threads)
+            self.recognizer = Recognizer(whisper_path, self.final_threads)
             self._loaded_whisper = whisper_path
+        # Ön çeviri için hızlı model: seçili model zaten 'small' ise onu kullan
+        small = models_dir() / "whisper-small"
+        if not interim or not (small / "model.bin").exists():
+            self.interim_recognizer = None
+        elif Path(whisper_path) == small:
+            self.interim_recognizer = self.recognizer
+        elif getattr(self, "_interim_path", None) != small:
+            self.events.put(("status", "Ön çeviri modeli yükleniyor…"))
+            self.interim_recognizer = Recognizer(small, self.interim_threads)
+            self._interim_path = small
         if self.translator is None:
             self.events.put(("status", "Çeviri modeli yükleniyor…"))
             self.translator = Translator(models_dir() / "nllb", self.threads)
@@ -401,12 +486,16 @@ class Engine:
         stream.start()
         return sr
 
-    def start_from_array(self, audio: np.ndarray, sr: int, realtime: bool = False):
-        """Test için: mikrofon yerine hazır bir ses dizisini akış gibi besler."""
+    def start_from_array(self, audio: np.ndarray, sr: int, realtime: bool = False, block: int = 0):
+        """Test için: mikrofon yerine hazır bir ses dizisini akış gibi besler.
+
+        block: örnek sayısı olarak blok boyutu (0 = 0.1 sn). Gerçek mikrofon blokları küçüktür
+        (ör. 48 kHz'de 512 örnek); dönüştürme hatalarını yakalamak için bunu taklit edin.
+        """
         self._stop.clear()
 
         def feeder():
-            step = int(sr * 0.1)
+            step = block or int(sr * 0.1)
             for i in range(0, len(audio), step):
                 if self._stop.is_set():
                     break
@@ -420,10 +509,17 @@ class Engine:
 
     def _run(self, sr: int):
         seg = Segmenter()
-        self.stats = {"vad_skipped": 0, "halluc_dropped": 0}
+        resampler = StreamResampler(sr)
+        self.stats = {"vad_skipped": 0, "halluc_dropped": 0, "interim": 0}
+        self._context = ""
+        self._wall0 = time.time()           # akış zamanı 0 = bu sistem saati
+        self._interim_slot = None           # en son ön çeviri isteği (yalnızca en yenisi tutulur)
+        self._interim_lock = threading.Lock()
+        self._last_final_id = 0
 
         def segment_loop():
             last_level = 0.0
+            last_interim_t = -1e9
             while True:
                 try:
                     x = self._audio_q.get(timeout=0.2)
@@ -431,9 +527,15 @@ class Engine:
                     if self._stop.is_set():
                         break
                     continue
-                for c in seg.push(_resample(x, sr)):
+                for c in seg.push(resampler.process(x)):
                     self._chunk_q.put((*c, time.monotonic()))   # kapanış anı: gecikme ölçümü için
                     self.events.put(("backlog", self._chunk_q.qsize()))
+                # Devam eden uzun cümle için ön çeviri isteği (işçi boştaysa yapılır)
+                cur = seg.current() if self.interim_recognizer is not None else None
+                if cur and cur[2] >= INTERIM_MIN_SEC and seg.t - last_interim_t >= INTERIM_EVERY_SEC:
+                    with self._interim_lock:
+                        self._interim_slot = cur
+                    last_interim_t = seg.t
                 now = time.monotonic()
                 if now - last_level > 0.1:
                     self.events.put(("level", seg.level))
@@ -442,23 +544,52 @@ class Engine:
                 self._chunk_q.put((*c, time.monotonic()))
             self._chunk_q.put(None)  # işçiye bitiş sinyali
 
+        self._worker_done = threading.Event()
         self._threads = [
             threading.Thread(target=segment_loop, daemon=True),
             threading.Thread(target=self._worker, daemon=True),
         ]
+        if self.parallel_interim and self.interim_recognizer is not None:
+            self._threads.append(threading.Thread(target=self._interim_loop, daemon=True))
         for t in self._threads:
             t.start()
         self.events.put(("status", "Dinleniyor…"))
 
+    def _interim_loop(self):
+        """Paralel mod: ön çeviriler kesin çevirilerden bağımsız olarak üretilir."""
+        while not self._worker_done.is_set():
+            iv = self._take_interim()
+            if iv:
+                self._do_interim(iv)
+            else:
+                time.sleep(0.05)
+
+    def _take_interim(self):
+        with self._interim_lock:
+            item, self._interim_slot = self._interim_slot, None
+        if item and item[0] > self._last_final_id:   # kesin çevirisi çıkmış parçanın önizlemesi gereksiz
+            return item
+        return None
+
     def _worker(self):
         while True:
-            item = self._chunk_q.get()
+            try:
+                # Kesin çeviri her zaman önceliklidir; kuyruk boşsa ön çeviri yapılır.
+                item = self._chunk_q.get(timeout=0.05)
+            except queue.Empty:
+                if not self.parallel_interim:      # sıralı mod: boşta kalınca ön çeviri yap
+                    iv = self._take_interim()
+                    if iv:
+                        self._do_interim(iv)
+                continue
             if item is None:
+                self._worker_done.set()
                 self.events.put(("status", "Durduruldu."))
                 self.events.put(("done", None))
                 return
-            t0, t1, audio, closed_at = item
+            t0, t1, audio, cid, closed_at = item
             self.events.put(("backlog", self._chunk_q.qsize()))
+            self._last_final_id = cid
             src, tgt = self.src, self.tgt   # oturum boyunca sabit (arayüz kayıtta seçimi kilitler)
             try:
                 # 1) Ucuz kapı: içinde gerçek konuşma yoksa Whisper'a hiç gönderme.
@@ -466,19 +597,47 @@ class Engine:
                 speech = self.recognizer.speech_seconds(audio)
                 if speech < MIN_VAD_SPEECH_SEC:
                     self.stats["vad_skipped"] += 1
+                    self.events.put(("discard", cid))        # varsa ön çeviriyi kaldır
                     continue
-                # 2) Tanıma + uydurma filtresi
-                text, logprob = self.recognizer.transcribe_ex(audio, language=src)
+                # 2) Tanıma (önceki metin bağlam olarak) + uydurma filtresi
+                prompt = self._context[-200:] if self.use_context else None
+                beam = self.final_beam or BEAM_BY_LANG.get(src, 1)
+                text, logprob = self.recognizer.transcribe_ex(
+                    audio, language=src, prompt=prompt, beam_size=beam)
                 cleaned = clean_hallucinations(text, src, speech, logprob)
                 if not cleaned:
                     if text:
                         self.stats["halluc_dropped"] += 1
+                    self.events.put(("discard", cid))
                     continue
+                self._context = (self._context + " " + cleaned).strip()[-400:]
                 out = self.translator.translate(cleaned, src, tgt)
-                self.events.put(("result", Result(t0, t1, cleaned, out, src, tgt,
-                                                  latency=time.monotonic() - closed_at)))
+                self.events.put(("result", Result(
+                    t0, t1, cleaned, out, src, tgt, latency=time.monotonic() - closed_at,
+                    wall=self._wall0 + t0, rid=cid)))
             except Exception as e:  # bir parçadaki hata tüm oturumu düşürmesin
                 self.events.put(("error", f"İşleme hatası: {e}"))
+
+    def _do_interim(self, item):
+        """Devam eden cümlenin hızlı (küçük model) ön tanıma + ön çevirisi."""
+        cid, t0, dur, audio = item
+        src, tgt = self.src, self.tgt
+        try:
+            if self.recognizer.speech_seconds(audio) < MIN_VAD_SPEECH_SEC:
+                return
+            prompt = self._context[-200:] if self.use_context else None
+            text, logprob = self.interim_recognizer.transcribe_ex(audio, language=src, prompt=prompt)
+            text = clean_hallucinations(text, src, 2.0, logprob)
+            if not text or cid <= self._last_final_id:   # bu arada kesin çevirisi geldiyse gösterme
+                return
+            out = self.translator.translate(text, src, tgt, beam_size=1)
+            if cid <= self._last_final_id:
+                return
+            self.stats["interim"] += 1
+            self.events.put(("interim", Result(t0, t0 + dur, text, out, src, tgt,
+                                               wall=self._wall0 + t0, rid=cid, interim=True)))
+        except Exception as e:
+            self.events.put(("error", f"Ön çeviri hatası: {e}"))
 
     def stop(self):
         """Kaydı durdurur; kuyruktaki parçalar işlenmeye devam eder ('done' gelene kadar)."""

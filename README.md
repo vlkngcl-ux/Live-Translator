@@ -49,10 +49,14 @@ Kurulum dosyaları GitHub'daki **Releases** sayfasındadır.
 3. **Mod**:
    - **Doğru (turbo)**: daha isabetli, daha çok işlemci ister (varsayılan).
    - **Hızlı (small)**: zayıf bilgisayarlar için; hatalar daha fazladır.
-4. **▶ Başlat**. Konuşma cümle cümle, birkaç saniye gecikmeyle çeviri olarak görünür.
+4. **▶ Başlat**. Konuşurken cümlenin **ön çevirisi** en altta gri-italik ve "…" ile görünür ve
+   konuşma sürdükçe güncellenir (hızlı modelle). Cümle bitince yerini doğru modelin
+   **kesin çevirisi** alır. Ön çeviriyi istemiyorsanız **"Ön çeviri"** kutusunu kapatın
+   (kapalıyken başlatılırsa hızlı model hiç yüklenmez, işlemci rahatlar).
 5. **■ Durdur** dediğinizde sırada kalan konuşma da işlenir.
-6. **TXT kaydet** / **DOCX kaydet** ile metni kaydedin.
+6. **TXT kaydet** / **DOCX kaydet** ile metni kaydedin. Dosyaya yalnızca kesin çeviriler yazılır.
    "Konuşulan metni de göster/kaydet" işaretliyse orijinal metin de eklenir.
+   **"Saat"** işaretliyse her cümlenin başında konuşmanın **sistem saati** (ör. `[18:12:05]`) yazar.
 
 Sağ alttaki **"Sırada bekleyen"** sayısı sürekli artıyorsa bilgisayar konuşmaya yetişemiyordur;
 **Hızlı (small)** moduna geçin.

@@ -11,11 +11,19 @@ def _ts(sec: float) -> str:
     return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
+def clock(r, end: bool = False) -> str:
+    """Sonucun SİSTEM SAATİ (SS:DD:ss). Saat bilgisi yoksa kayıt başından geçen süre."""
+    if getattr(r, "wall", 0):
+        t = r.wall + ((r.t_end - r.t_start) if end else 0.0)
+        return _dt.datetime.fromtimestamp(t).strftime("%H:%M:%S")
+    return _ts(r.t_end if end else r.t_start)
+
+
 def build_lines(results, include_source: bool, include_time: bool):
     """[(zaman satırı veya None, çeviri, '(XX) kaynak metin' veya None)]"""
     rows = []
     for r in results:
-        head = f"[{_ts(r.t_start)} - {_ts(r.t_end)}]" if include_time else None
+        head = f"[{clock(r)} - {clock(r, end=True)}]" if include_time else None
         src = f"({lang_short(r.src)}) {r.source}" if include_source else None
         rows.append((head, r.target, src))
     return rows
