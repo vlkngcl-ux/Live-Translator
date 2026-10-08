@@ -44,6 +44,8 @@ SEG_MAX_COMPRESSION = 2.4   # metin tekrarı göstergesi (gzip sıkıştırma or
 PARALLEL_INTERIM_MIN_CPUS = 6   # bu kadar çekirdek varsa ön çeviri ayrı iş parçacığında çalışır
 INTERIM_MIN_SEC = 1.5       # devam eden cümle en az bu uzunluktaysa ön çeviri yapılır
 INTERIM_EVERY_SEC = 1.5     # ön çeviri en fazla bu sıklıkta güncellenir
+INTERIM_GAP_SEC = 1.0       # bir ön çeviri bittikten sonra bir sonrakine kadar en az bu kadar bekle
+INTERIM_STOP_ON_SILENCE_SEC = 0.2   # bu kadar sessizlik başladıysa yeni ön çeviri başlatma
 MIN_SPEECH_SEC = 0.3        # toplam konuşma bundan azsa parça atılır (gürültüyü Whisper VAD ayrıca eler)
 PREROLL_SEC = 0.3           # konuşma başlamadan önceki bu kadar ses de parçaya eklenir
 NOISE_WINDOW_SEC = 15.0     # gürültü tabanı bu pencerenin alt NOISE_PERCENTILE'ından hesaplanır
@@ -615,6 +617,7 @@ class Engine:
         self._interim_slot = None           # en son ön çeviri isteği (yalnızca en yenisi tutulur)
         self._interim_lock = threading.Lock()
         self._last_final_id = 0
+        self._last_interim_done = 0.0
 
         def segment_loop():
             last_level = 0.0
@@ -631,7 +634,11 @@ class Engine:
                     self.events.put(("backlog", self._chunk_q.qsize()))
                 # Devam eden uzun cümle için ön çeviri isteği (işçi boştaysa yapılır)
                 cur = seg.current() if self.interim_recognizer is not None else None
-                if cur and cur[2] >= INTERIM_MIN_SEC and seg.t - last_interim_t >= INTERIM_EVERY_SEC:
+                # Konuşmacı durmaya başladıysa yeni ön çeviri başlatma: cümle birazdan kapanacak ve
+                # sürmekte olan bir ön çeviri kesin çeviriyi bekletirdi (Mac ölçümü: 4.7 sn bekleme).
+                speaking = seg.silence_run * FRAME_SEC < INTERIM_STOP_ON_SILENCE_SEC
+                if (cur and speaking and cur[2] >= INTERIM_MIN_SEC
+                        and seg.t - last_interim_t >= INTERIM_EVERY_SEC):
                     with self._interim_lock:
                         self._interim_slot = cur
                     last_interim_t = seg.t
@@ -669,6 +676,10 @@ class Engine:
                 time.sleep(0.05)
 
     def _take_interim(self):
+        # Ön çeviriler arasında boşluk bırak: işçi sürekli meşgul olmasın, cümle kapandığında
+        # kesin çeviri boşta bir işçi bulsun.
+        if time.monotonic() - self._last_interim_done < INTERIM_GAP_SEC:
+            return None
         with self._interim_lock:
             item, self._interim_slot = self._interim_slot, None
         if item and item[0] > self._last_final_id:   # kesin çevirisi çıkmış parçanın önizlemesi gereksiz
@@ -753,6 +764,8 @@ class Engine:
                                                wall=self._wall0 + t0, rid=cid, interim=True)))
         except Exception as e:
             self.events.put(("error", f"Ön çeviri hatası: {e}"))
+        finally:
+            self._last_interim_done = time.monotonic()
 
     def stop(self):
         """Kaydı durdurur; kuyruktaki parçalar işlenmeye devam eder ('done' gelene kadar)."""
